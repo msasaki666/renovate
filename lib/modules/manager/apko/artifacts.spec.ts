@@ -382,7 +382,8 @@ describe('modules/manager/apko/artifacts', () => {
         artifact({
           packageFileName: 'app/pkgs/apko.yaml',
           updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
-          newPackageFileContent: 'contents:\n  packages:\n    - bash=5.2.38-r0\n',
+          newPackageFileContent:
+            'contents:\n  packages:\n    - bash=5.2.38-r0\n',
         }),
       ),
     ).resolves.toEqual([
@@ -394,11 +395,13 @@ describe('modules/manager/apko/artifacts', () => {
         },
       },
     ]);
-    expect(execSnapshots).toMatchObject([
-      { cmd: `apko lock ${quote('app/apko.yaml')}` },
+    expect(execSnapshots).toEqual([
+      expect.objectContaining({
+        cmd: 'apko lock apko.yaml',
+        options: expect.objectContaining({
+          cwd: lockCwd('app/apko.yaml'),
+        }),
+      }),
     ]);
-    expect(execSnapshots.map((snapshot) => snapshot.cmd)).not.toContain(
-      'apko lock app/pkgs/apko.yaml',
-    );
   });
 });
