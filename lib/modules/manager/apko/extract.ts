@@ -579,5 +579,8 @@ export async function extractAllPackageFiles(
     );
   }
 
+  if (!order.length) {
+    return null;
+  }
   return order.map(toPackageFile);
 }
