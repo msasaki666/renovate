@@ -672,22 +672,168 @@ describe('modules/manager/apko/extract', () => {
     });
   });
 
-  it('does not follow include', async () => {
+  it('extracts included packages with the parent repositories', async () => {
     const child = Fixtures.get('include-child.yaml');
     fs.readLocalFile.mockImplementation(
-      (fileName: string): Promise<string | null> => {
-        if (
-          fileName === 'pkgs/apko.yaml' ||
-          fileName === 'app/pkgs/apko.yaml'
-        ) {
-          return Promise.resolve(child);
-        }
-        return Promise.resolve(null);
-      },
+      (fileName: string): Promise<string | null> =>
+        Promise.resolve(fileName === 'app/pkgs/apko.yaml' ? child : null),
     );
 
     await expect(
       extractPackageFile(Fixtures.get('include-parent.yaml'), 'app/apko.yaml'),
+    ).resolves.toEqual({
+      deps: [
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
+        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86]),
+      ],
+    });
+  });
+
+  it('merges included repositories before the parent and keeps the parent archs', async () => {
+    // Included lists are placed before the parent lists, and parent archs win
+    // when set. ImageContents.MergeInto and ImageConfiguration.MergeInto in
+    // chainguard-dev/apko pkg/build/types/image_configuration.go.
+    const child = Fixtures.get('include-child-repos.yaml');
+    fs.readLocalFile.mockImplementation(
+      (fileName: string): Promise<string | null> =>
+        Promise.resolve(fileName === 'app/pkgs/apko.yaml' ? child : null),
+    );
+    const registryUrls = [
+      registryUrl(alpineMain, 'x86_64'),
+      wolfiX86,
+      registryUrl(chainguard, 'x86_64'),
+      registryUrl(alpineCommunity, 'x86_64'),
+    ];
+
+    await expect(
+      extractPackageFile(Fixtures.get('include-parent.yaml'), 'app/apko.yaml'),
+    ).resolves.toEqual({
+      deps: [
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', registryUrls),
+        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', registryUrls),
+      ],
+    });
+  });
+
+  it('uses included archs when the parent does not set them', async () => {
+    const child = yaml({
+      repositories: [alpineMain],
+      packages: ['bash=5.2.37-r2'],
+      archs: ['arm64'],
+    });
+    const parent = yaml({
+      include: 'child.yaml',
+      repositories: [wolfi],
+      packages: ['curl=8.12.1-r0'],
+    });
+    fs.readLocalFile.mockImplementation(
+      (fileName: string): Promise<string | null> =>
+        Promise.resolve(fileName === 'images/child.yaml' ? child : null),
+    );
+    const registryUrls = [
+      registryUrl(alpineMain, 'aarch64'),
+      registryUrl(wolfi, 'aarch64'),
+    ];
+
+    await expect(
+      extractPackageFile(parent, 'images/apko.yaml'),
+    ).resolves.toEqual({
+      deps: [
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', registryUrls),
+        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', registryUrls),
+      ],
+    });
+  });
+
+  it('follows a nested include relative to each file', async () => {
+    const files: Record<string, string> = {
+      'app/include-nested-mid.yaml': Fixtures.get('include-nested-mid.yaml'),
+      'include-nested-base.yaml': Fixtures.get('include-nested-base.yaml'),
+    };
+    fs.readLocalFile.mockImplementation(
+      (fileName: string): Promise<string | null> =>
+        Promise.resolve(files[fileName] ?? null),
+    );
+    const registryUrls = [registryUrl(alpineMain, 'x86_64'), wolfiX86];
+
+    await expect(
+      extractPackageFile(Fixtures.get('include-nested-app.yaml'), 'app/apko.yaml'),
+    ).resolves.toEqual({
+      deps: [
+        pin('alpine-base=3.22.0-r0', 'alpine-base', '3.22.0-r0', registryUrls),
+        pin('busybox=1.36.1-r0', 'busybox', '1.36.1-r0', registryUrls),
+        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', registryUrls),
+      ],
+    });
+  });
+
+  it('extracts each file once when includes form a cycle', async () => {
+    // ImageConfiguration.parse loads includes recursively and has no visited set.
+    const files: Record<string, string> = {
+      'cycle/b.yaml': Fixtures.get('include-cycle-b.yaml'),
+    };
+    fs.readLocalFile.mockImplementation(
+      (fileName: string): Promise<string | null> =>
+        Promise.resolve(files[fileName] ?? null),
+    );
+    const registryUrls = [registryUrl(alpineMain, 'x86_64'), wolfiX86];
+
+    await expect(
+      extractPackageFile(Fixtures.get('include-cycle-a.yaml'), 'cycle/a.yaml'),
+    ).resolves.toEqual({
+      deps: [
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', registryUrls),
+        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', registryUrls),
+      ],
+    });
+  });
+
+  it('keeps parent packages when the include cannot be read', async () => {
+    fs.readLocalFile.mockResolvedValue(null);
+
+    await expect(
+      extractPackageFile(Fixtures.get('include-parent.yaml'), 'app/apko.yaml'),
+    ).resolves.toEqual({
+      deps: [pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86])],
+    });
+  });
+
+  it('ignores an include path that leaves the repository', async () => {
+    const outside = yaml({
+      packages: ['bash=5.2.37-r2'],
+    });
+    fs.readLocalFile.mockImplementation(
+      (fileName: string): Promise<string | null> => {
+        if (
+          fileName === '../outside.yaml' ||
+          fileName === '/tmp/outside.yaml'
+        ) {
+          return Promise.resolve(outside);
+        }
+        return Promise.resolve(null);
+      },
+    );
+    const escaped = yaml({
+      include: '../../outside.yaml',
+      repositories: [wolfi],
+      packages: ['curl=8.12.1-r0'],
+      archs: ['amd64'],
+    });
+
+    await expect(extractPackageFile(escaped, 'app/apko.yaml')).resolves.toEqual(
+      {
+        deps: [pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86])],
+      },
+    );
+
+    const absolute = yaml({
+      include: '/tmp/outside.yaml',
+      repositories: [wolfi],
+      packages: ['curl=8.12.1-r0'],
+      archs: ['amd64'],
+    });
+    await expect(
+      extractPackageFile(absolute, 'app/apko.yaml'),
     ).resolves.toEqual({
       deps: [pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86])],
     });

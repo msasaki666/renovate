@@ -1,0 +1,8 @@
+include: a.yaml
+contents:
+  repositories:
+    - https://dl-cdn.alpinelinux.org/alpine/v3.22/main
+  packages:
+    - bash=5.2.37-r2
+archs:
+  - arm64
