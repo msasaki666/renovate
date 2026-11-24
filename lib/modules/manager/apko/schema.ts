@@ -3,6 +3,7 @@ import { Json, Yaml } from '../../../util/schema-utils/index.ts';
 
 export const ApkoConfig = Yaml.pipe(
   z.object({
+    include: z.string().optional(),
     contents: z.object({
       repositories: z.array(z.string()).optional(),
       build_repositories: z.array(z.string()).optional(),

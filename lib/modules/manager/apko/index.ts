@@ -2,7 +2,7 @@ import type { Category } from '../../../constants/index.ts';
 import { ApkDatasource } from '../../datasource/apk/index.ts';
 
 export { updateArtifacts } from './artifacts.ts';
-export { extractPackageFile } from './extract.ts';
+export { extractAllPackageFiles, extractPackageFile } from './extract.ts';
 
 export const url =
   'https://github.com/chainguard-dev/apko/blob/main/docs/apko_file.md';
