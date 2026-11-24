@@ -1095,6 +1095,71 @@ describe('modules/manager/apko/extract', () => {
     ]);
   });
 
+  it('uses lockedVersion from the only parent lock that contains the package', async () => {
+    const shared = yaml({
+      packages: ['bash=5.2.37-r2'],
+    });
+    const parentA = yaml({
+      include: '../../shared/pkgs.yaml',
+      repositories: [wolfi],
+      packages: ['curl=8.12.1-r0'],
+      archs: ['amd64'],
+    });
+    const parentB = yaml({
+      include: '../../shared/pkgs.yaml',
+      repositories: [wolfi],
+      packages: ['curl=8.12.1-r0'],
+      archs: ['amd64'],
+    });
+    mockFiles({
+      'images/a/apko.yaml': parentA,
+      'images/b/apko.yaml': parentB,
+      'shared/pkgs.yaml': shared,
+      'images/a/apko.lock.json': lockJson([
+        { name: 'bash', version: '5.2.37-r2' },
+      ]),
+      'images/b/apko.lock.json': lockJson([
+        { name: 'curl', version: '8.12.1-r0' },
+      ]),
+    });
+
+    const result = await extractAllPackageFiles({}, [
+      'images/a/apko.yaml',
+      'images/b/apko.yaml',
+    ]);
+    const child = result?.find(
+      (packageFile) => packageFile.packageFile === 'shared/pkgs.yaml',
+    );
+
+    expect(child?.deps).toEqual([
+      {
+        ...pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
+        lockedVersion: '5.2.37-r2',
+      },
+    ]);
+  });
+
+  it('returns null when no package file has dependencies', async () => {
+    // gradle's extractAllPackageFiles returns null when it extracts nothing.
+    // getManagerPackageFiles returns that null
+    // (lib/workers/repository/extract/manager-files.ts).
+    mockFiles({
+      'empty.yaml': yaml({
+        repositories: [wolfi],
+        packages: [],
+        archs: ['amd64'],
+      }),
+    });
+
+    await expect(extractAllPackageFiles({}, [])).resolves.toBeNull();
+    await expect(
+      extractAllPackageFiles({}, ['missing.yaml']),
+    ).resolves.toBeNull();
+    await expect(
+      extractAllPackageFiles({}, ['empty.yaml']),
+    ).resolves.toBeNull();
+  });
+
   it('emits a matched include once and appends its own lock and registries', async () => {
     // shared/pkgs.yaml also matches as a root. A second entry would list
     // bash twice. The entry recorded for the first parent keeps one dep.

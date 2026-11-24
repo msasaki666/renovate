@@ -1,7 +1,7 @@
 import { quote } from 'shlex';
 import upath from 'upath';
 import { mockDeep } from 'vitest-mock-extended';
-import { mockExecAll } from '~test/exec-util.ts';
+import { mockExecAll, mockExecSequence } from '~test/exec-util.ts';
 import { fs } from '~test/util.ts';
 import { GlobalConfig } from '../../../config/global.ts';
 import type {
@@ -513,5 +513,125 @@ describe('modules/manager/apko/artifacts', () => {
         }),
       }),
     ]);
+  });
+
+  it('returns the regenerated lock and an artifact error when another lock fails', async () => {
+    // UpdateArtifactsResult is one file or one artifactError per entry.
+    // pip-compile pushes both into the same array
+    // (lib/modules/manager/pip-compile/artifacts.ts).
+    mockReads({
+      'images/a/apko.yaml': 'contents: {}\n',
+      'images/a/apko.lock.json': ['old-a\n', 'new-a\n'],
+      'images/b/apko.yaml': 'contents: {}\n',
+      'images/b/apko.lock.json': 'old-b\n',
+    });
+    mockExecSequence([
+      { stdout: '', stderr: '' },
+      new ExecError('apko failed', {
+        cmd: 'apko lock apko.yaml',
+        stdout: '',
+        stderr: 'boom',
+        options: {},
+      }),
+    ]);
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'shared/pkgs.yaml',
+          updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
+          config: {
+            lockFiles: ['images/a/apko.lock.json', 'images/b/apko.lock.json'],
+          },
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        file: {
+          type: 'addition',
+          path: 'images/a/apko.lock.json',
+          contents: 'new-a\n',
+        },
+      },
+      {
+        artifactError: {
+          fileName: 'images/b/apko.lock.json',
+          stderr: 'boom',
+        },
+      },
+    ]);
+  });
+
+  it('returns null when every configured lock file is missing', async () => {
+    // A single missing lock returns null. pip-compile returns null when its
+    // result list is empty. An empty array is not that result.
+    mockReads({
+      'images/a/apko.yaml': 'contents: {}\n',
+      'images/b/apko.yaml': 'contents: {}\n',
+    });
+    const execSnapshots = mockExecAll();
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'shared/pkgs.yaml',
+          updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
+          config: {
+            lockFiles: ['images/a/apko.lock.json', 'images/b/apko.lock.json'],
+          },
+        }),
+      ),
+    ).resolves.toBeNull();
+    expect(execSnapshots).toEqual([]);
+  });
+
+  it('skips a lock that has no sibling config', async () => {
+    mockReads({
+      'images/a/apko.yaml': 'contents: {}\n',
+      'images/a/apko.lock.json': ['old-a\n', 'new-a\n'],
+      'orphan/apko.lock.json': 'old-orphan\n',
+    });
+    const execSnapshots = mockExecAll();
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'shared/pkgs.yaml',
+          updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
+          config: {
+            lockFiles: ['images/a/apko.lock.json', 'orphan/apko.lock.json'],
+          },
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        file: {
+          type: 'addition',
+          path: 'images/a/apko.lock.json',
+          contents: 'new-a\n',
+        },
+      },
+    ]);
+    expect(execSnapshots.map((snapshot) => snapshot.cmd)).toEqual([
+      'apko lock apko.yaml',
+    ]);
+  });
+
+  it('returns null when the only lock has no sibling config', async () => {
+    mockReads({
+      'orphan/apko.lock.json': 'old-orphan\n',
+    });
+    const execSnapshots = mockExecAll();
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'shared/pkgs.yaml',
+          updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
+          config: { lockFiles: ['orphan/apko.lock.json'] },
+        }),
+      ),
+    ).resolves.toBeNull();
+    expect(execSnapshots).toEqual([]);
   });
 });
