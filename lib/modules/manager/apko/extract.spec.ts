@@ -2,7 +2,12 @@ import { codeBlock } from 'common-tags';
 import upath from 'upath';
 import { Fixtures } from '~test/fixtures.ts';
 import { fs } from '~test/util.ts';
-import type { PackageDependency } from '../types.ts';
+import type {
+  ExtractConfig,
+  PackageDependency,
+  PackageFile,
+} from '../types.ts';
+import * as apkoManager from './index.ts';
 import { extractPackageFile } from './index.ts';
 
 vi.mock('../../../util/fs/index.ts');
@@ -72,6 +77,49 @@ function yaml(options: {
     }
   }
   return `${lines.join('\n')}\n`;
+}
+
+type ExtractAllPackageFiles = (
+  config: ExtractConfig,
+  packageFiles: string[],
+) => Promise<PackageFile[] | null>;
+
+function extractAllPackageFiles(
+  config: ExtractConfig,
+  packageFiles: string[],
+): Promise<PackageFile[] | null> {
+  const extractAll = (
+    apkoManager as { extractAllPackageFiles?: ExtractAllPackageFiles }
+  ).extractAllPackageFiles;
+  if (!extractAll) {
+    return Promise.reject(
+      new Error('extractAllPackageFiles is not implemented'),
+    );
+  }
+  return extractAll(config, packageFiles);
+}
+
+function mockFiles(files: Record<string, string>): void {
+  fs.readLocalFile.mockImplementation(
+    (fileName: string): Promise<string | null> =>
+      Promise.resolve(files[fileName] ?? null),
+  );
+}
+
+function extracted(
+  packageFile: string,
+  deps: PackageDependency[],
+  lockFiles?: string[],
+): PackageFile {
+  const result: PackageFile = { packageFile, deps };
+  if (lockFiles) {
+    result.lockFiles = lockFiles;
+  }
+  return result;
+}
+
+function lockJson(packages: { name: string; version: string }[]): string {
+  return JSON.stringify({ contents: { packages } });
 }
 
 function pin(
@@ -678,32 +726,90 @@ describe('modules/manager/apko/extract', () => {
     });
   });
 
-  it('extracts included packages with the parent repositories', async () => {
+  it('returns one package file when the config has no include', async () => {
+    const content = yaml({
+      repositories: [wolfi],
+      packages: ['bash=5.2.37-r2'],
+      archs: ['amd64'],
+    });
+    mockFiles({ 'apko.yaml': content });
+
+    await expect(extractAllPackageFiles({}, ['apko.yaml'])).resolves.toEqual([
+      extracted('apko.yaml', [
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
+      ]),
+    ]);
+  });
+
+  it('keeps an included package on its own file with the parent lock', async () => {
+    // getManagerPackageFiles uses extractAllPackageFiles and does not also
+    // call extractPackageFile
+    // (lib/workers/repository/extract/manager-files.ts). gradle returns one
+    // PackageFile per owning file. Renovate rewrites that file's contents, so
+    // a version that lives in the child cannot be updated from the parent
+    // entry. patchConfigForArtifactsUpdate
+    // (lib/workers/repository/update/branch/get-updated.ts) copies the child
+    // entry's lockFiles onto config.lockFiles before updateArtifacts.
+    const parent = Fixtures.get('include-parent.yaml');
     const child = Fixtures.get('include-child.yaml');
-    fs.readLocalFile.mockImplementation(
-      (fileName: string): Promise<string | null> =>
-        Promise.resolve(fileName === 'app/pkgs/apko.yaml' ? child : null),
-    );
+    const lock = lockJson([
+      { name: 'bash', version: '5.2.37-r2' },
+      { name: 'curl', version: '8.12.1-r0' },
+    ]);
+    mockFiles({
+      'app/apko.yaml': parent,
+      'app/pkgs/apko.yaml': child,
+      'app/apko.lock.json': lock,
+    });
 
     await expect(
-      extractPackageFile(Fixtures.get('include-parent.yaml'), 'app/apko.yaml'),
-    ).resolves.toEqual({
-      deps: [
-        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
-        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86]),
-      ],
-    });
+      extractAllPackageFiles({}, ['app/apko.yaml']),
+    ).resolves.toEqual([
+      extracted(
+        'app/apko.yaml',
+        [
+          {
+            ...pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86]),
+            lockedVersion: '8.12.1-r0',
+          },
+        ],
+        ['app/apko.lock.json'],
+      ),
+      extracted(
+        'app/pkgs/apko.yaml',
+        [
+          {
+            ...pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
+            lockedVersion: '5.2.37-r2',
+          },
+        ],
+        ['app/apko.lock.json'],
+      ),
+    ]);
   });
 
   it('merges included repositories before the parent and keeps the parent archs', async () => {
     // Included lists are placed before the parent lists, and parent archs win
     // when set. ImageContents.MergeInto and ImageConfiguration.MergeInto in
     // chainguard-dev/apko pkg/build/types/image_configuration.go.
-    const child = Fixtures.get('include-child-repos.yaml');
-    fs.readLocalFile.mockImplementation(
-      (fileName: string): Promise<string | null> =>
-        Promise.resolve(fileName === 'app/pkgs/apko.yaml' ? child : null),
-    );
+    const child = yaml({
+      repositories: [alpineMain, 'https://mirror.example.com/os?token=secret'],
+      buildRepositories: [chainguard],
+      runtimeRepositories: ['https://example.com/runtime'],
+      packages: ['bash=5.2.37-r2'],
+      archs: ['arm64'],
+    });
+    const parent = yaml({
+      include: 'pkgs/apko.yaml',
+      repositories: [wolfi],
+      buildRepositories: [alpineCommunity],
+      packages: ['curl=8.12.1-r0'],
+      archs: ['amd64'],
+    });
+    mockFiles({
+      'app/apko.yaml': parent,
+      'app/pkgs/apko.yaml': child,
+    });
     const registryUrls = [
       registryUrl(alpineMain, 'x86_64'),
       wolfiX86,
@@ -712,13 +818,15 @@ describe('modules/manager/apko/extract', () => {
     ];
 
     await expect(
-      extractPackageFile(Fixtures.get('include-parent.yaml'), 'app/apko.yaml'),
-    ).resolves.toEqual({
-      deps: [
-        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', registryUrls),
+      extractAllPackageFiles({}, ['app/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('app/apko.yaml', [
         pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', registryUrls),
-      ],
-    });
+      ]),
+      extracted('app/pkgs/apko.yaml', [
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', registryUrls),
+      ]),
+    ]);
   });
 
   it('uses included archs when the parent does not set them', async () => {
@@ -732,104 +840,114 @@ describe('modules/manager/apko/extract', () => {
       repositories: [wolfi],
       packages: ['curl=8.12.1-r0'],
     });
-    fs.readLocalFile.mockImplementation(
-      (fileName: string): Promise<string | null> =>
-        Promise.resolve(fileName === 'images/child.yaml' ? child : null),
-    );
+    mockFiles({
+      'images/apko.yaml': parent,
+      'images/child.yaml': child,
+    });
     const registryUrls = [
       registryUrl(alpineMain, 'aarch64'),
       registryUrl(wolfi, 'aarch64'),
     ];
 
     await expect(
-      extractPackageFile(parent, 'images/apko.yaml'),
-    ).resolves.toEqual({
-      deps: [
-        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', registryUrls),
+      extractAllPackageFiles({}, ['images/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('images/apko.yaml', [
         pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', registryUrls),
-      ],
-    });
+      ]),
+      extracted('images/child.yaml', [
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', registryUrls),
+      ]),
+    ]);
   });
 
-  it('follows a nested include relative to each file', async () => {
-    const files: Record<string, string> = {
-      'app/include-nested-mid.yaml': Fixtures.get('include-nested-mid.yaml'),
-      'include-nested-base.yaml': Fixtures.get('include-nested-base.yaml'),
-    };
-    fs.readLocalFile.mockImplementation(
-      (fileName: string): Promise<string | null> =>
-        Promise.resolve(files[fileName] ?? null),
-    );
+  it('resolves nested includes from the root config directory', async () => {
+    // paths.ResolvePath stats the include against the process cwd before
+    // --include-paths (chainguard-dev/apko pkg/paths/paths.go). Renovate runs
+    // `apko lock` with cwd set to the root config directory, so `base.yaml`
+    // from pkgs/mid.yaml is app/base.yaml.
+    mockFiles({
+      'app/apko.yaml': Fixtures.get('include-nested-app.yaml'),
+      'app/pkgs/mid.yaml': Fixtures.get('include-nested-mid.yaml'),
+      'app/base.yaml': Fixtures.get('include-nested-base.yaml'),
+    });
     const registryUrls = [registryUrl(alpineMain, 'x86_64'), wolfiX86];
 
     await expect(
-      extractPackageFile(Fixtures.get('include-nested-app.yaml'), 'app/apko.yaml'),
-    ).resolves.toEqual({
-      deps: [
-        pin('alpine-base=3.22.0-r0', 'alpine-base', '3.22.0-r0', registryUrls),
-        pin('busybox=1.36.1-r0', 'busybox', '1.36.1-r0', registryUrls),
+      extractAllPackageFiles({}, ['app/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('app/apko.yaml', [
         pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', registryUrls),
-      ],
-    });
+      ]),
+      extracted('app/pkgs/mid.yaml', [
+        pin('busybox=1.36.1-r0', 'busybox', '1.36.1-r0', registryUrls),
+      ]),
+      extracted('app/base.yaml', [
+        pin('alpine-base=3.22.0-r0', 'alpine-base', '3.22.0-r0', registryUrls),
+      ]),
+    ]);
   });
 
   it('extracts each file once when includes form a cycle', async () => {
-    // ImageConfiguration.parse loads includes recursively and has no visited set.
-    const files: Record<string, string> = {
+    // ImageConfiguration.parse loads the include recursively and has no
+    // visited set (chainguard-dev/apko pkg/build/types/image_configuration.go).
+    mockFiles({
+      'cycle/a.yaml': Fixtures.get('include-cycle-a.yaml'),
       'cycle/b.yaml': Fixtures.get('include-cycle-b.yaml'),
-    };
-    fs.readLocalFile.mockImplementation(
-      (fileName: string): Promise<string | null> =>
-        Promise.resolve(files[fileName] ?? null),
-    );
+    });
     const registryUrls = [registryUrl(alpineMain, 'x86_64'), wolfiX86];
 
-    await expect(
-      extractPackageFile(Fixtures.get('include-cycle-a.yaml'), 'cycle/a.yaml'),
-    ).resolves.toEqual({
-      deps: [
-        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', registryUrls),
-        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', registryUrls),
+    await expect(extractAllPackageFiles({}, ['cycle/a.yaml'])).resolves.toEqual(
+      [
+        extracted('cycle/a.yaml', [
+          pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', registryUrls),
+        ]),
+        extracted('cycle/b.yaml', [
+          pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', registryUrls),
+        ]),
       ],
-    });
+    );
   });
 
   it('keeps parent packages when the include cannot be read', async () => {
-    fs.readLocalFile.mockResolvedValue(null);
+    mockFiles({
+      'app/apko.yaml': Fixtures.get('include-parent.yaml'),
+    });
 
     await expect(
-      extractPackageFile(Fixtures.get('include-parent.yaml'), 'app/apko.yaml'),
-    ).resolves.toEqual({
-      deps: [pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86])],
-    });
+      extractAllPackageFiles({}, ['app/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('app/apko.yaml', [
+        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86]),
+      ]),
+    ]);
   });
 
   it('ignores an include path that leaves the repository', async () => {
     const outside = yaml({
       packages: ['bash=5.2.37-r2'],
     });
-    fs.readLocalFile.mockImplementation(
-      (fileName: string): Promise<string | null> => {
-        if (
-          fileName === '../outside.yaml' ||
-          fileName === '/tmp/outside.yaml'
-        ) {
-          return Promise.resolve(outside);
-        }
-        return Promise.resolve(null);
-      },
-    );
     const escaped = yaml({
       include: '../../outside.yaml',
       repositories: [wolfi],
       packages: ['curl=8.12.1-r0'],
       archs: ['amd64'],
     });
+    mockFiles({
+      'app/apko.yaml': escaped,
+      '../outside.yaml': outside,
+      '/tmp/outside.yaml': outside,
+    });
 
-    await expect(extractPackageFile(escaped, 'app/apko.yaml')).resolves.toEqual(
-      {
-        deps: [pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86])],
-      },
+    await expect(
+      extractAllPackageFiles({}, ['app/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('app/apko.yaml', [
+        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86]),
+      ]),
+    ]);
+    expect(fs.readLocalFile.mock.calls.map((call) => call[0])).not.toContain(
+      '../outside.yaml',
     );
 
     const absolute = yaml({
@@ -838,11 +956,20 @@ describe('modules/manager/apko/extract', () => {
       packages: ['curl=8.12.1-r0'],
       archs: ['amd64'],
     });
-    await expect(
-      extractPackageFile(absolute, 'app/apko.yaml'),
-    ).resolves.toEqual({
-      deps: [pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86])],
+    mockFiles({
+      'app/apko.yaml': absolute,
+      '/tmp/outside.yaml': outside,
     });
+    await expect(
+      extractAllPackageFiles({}, ['app/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('app/apko.yaml', [
+        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86]),
+      ]),
+    ]);
+    expect(fs.readLocalFile.mock.calls.map((call) => call[0])).not.toContain(
+      '/tmp/outside.yaml',
+    );
   });
 
   it('extracts an included file alone without the parent repositories', async () => {
@@ -859,5 +986,193 @@ describe('modules/manager/apko/extract', () => {
         },
       ],
     });
+  });
+
+  it('lists one child for every parent and unions registry URLs in parent order', async () => {
+    // One child entry. lockFiles lists every root lock, in matched-file
+    // order. registryUrls is the union of each parent's merged list in that
+    // order. updateArtifacts runs once for the child and receives every
+    // lock file (get-updated.ts patchConfigForArtifactsUpdate). pip-compile
+    // walks config.lockFiles and returns one result per lock.
+    const shared = yaml({
+      repositories: [alpineCommunity],
+      packages: ['bash=5.2.37-r2'],
+      archs: ['arm64'],
+    });
+    const parentA = yaml({
+      include: '../../shared/pkgs.yaml',
+      repositories: [wolfi],
+      packages: ['curl=8.12.1-r0'],
+      archs: ['amd64'],
+    });
+    const parentB = yaml({
+      include: '../../shared/pkgs.yaml',
+      repositories: [alpineMain],
+      packages: ['busybox=1.36.1-r0'],
+      archs: ['amd64'],
+    });
+    const lock = lockJson([{ name: 'bash', version: '5.2.37-r2' }]);
+    mockFiles({
+      'images/a/apko.yaml': parentA,
+      'images/b/apko.yaml': parentB,
+      'shared/pkgs.yaml': shared,
+      'images/a/apko.lock.json': lock,
+      'images/b/apko.lock.json': lock,
+    });
+    const fromA = [registryUrl(alpineCommunity, 'x86_64'), wolfiX86];
+    const fromB = [
+      registryUrl(alpineCommunity, 'x86_64'),
+      registryUrl(alpineMain, 'x86_64'),
+    ];
+
+    await expect(
+      extractAllPackageFiles({}, ['images/a/apko.yaml', 'images/b/apko.yaml']),
+    ).resolves.toEqual([
+      extracted(
+        'images/a/apko.yaml',
+        [pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', fromA)],
+        ['images/a/apko.lock.json'],
+      ),
+      extracted(
+        'shared/pkgs.yaml',
+        [
+          {
+            ...pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [
+              ...fromA,
+              registryUrl(alpineMain, 'x86_64'),
+            ]),
+            lockedVersion: '5.2.37-r2',
+          },
+        ],
+        ['images/a/apko.lock.json', 'images/b/apko.lock.json'],
+      ),
+      extracted(
+        'images/b/apko.yaml',
+        [pin('busybox=1.36.1-r0', 'busybox', '1.36.1-r0', fromB)],
+        ['images/b/apko.lock.json'],
+      ),
+    ]);
+  });
+
+  it('omits lockedVersion when parent locks disagree', async () => {
+    const shared = yaml({
+      packages: ['bash=5.2.37-r2'],
+    });
+    const parentA = yaml({
+      include: '../../shared/pkgs.yaml',
+      repositories: [wolfi],
+      packages: ['curl=8.12.1-r0'],
+      archs: ['amd64'],
+    });
+    const parentB = yaml({
+      include: '../../shared/pkgs.yaml',
+      repositories: [wolfi],
+      packages: ['curl=8.12.1-r0'],
+      archs: ['amd64'],
+    });
+    mockFiles({
+      'images/a/apko.yaml': parentA,
+      'images/b/apko.yaml': parentB,
+      'shared/pkgs.yaml': shared,
+      'images/a/apko.lock.json': lockJson([
+        { name: 'bash', version: '5.2.37-r2' },
+      ]),
+      'images/b/apko.lock.json': lockJson([
+        { name: 'bash', version: '5.2.38-r0' },
+      ]),
+    });
+
+    const result = await extractAllPackageFiles({}, [
+      'images/a/apko.yaml',
+      'images/b/apko.yaml',
+    ]);
+    const child = result?.find(
+      (packageFile) => packageFile.packageFile === 'shared/pkgs.yaml',
+    );
+
+    expect(child?.deps).toEqual([
+      pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
+    ]);
+  });
+
+  it('emits a matched include once and appends its own lock and registries', async () => {
+    // shared/pkgs.yaml also matches as a root. A second entry would list
+    // bash twice. The entry recorded for the first parent keeps one dep.
+    // Visiting the matched file appends its own lock and any standalone
+    // registry URL that is not already present.
+    const shared = yaml({
+      repositories: [alpineCommunity],
+      packages: ['bash=5.2.37-r2'],
+      archs: ['arm64'],
+    });
+    const parentA = yaml({
+      include: '../../shared/pkgs.yaml',
+      repositories: [wolfi],
+      packages: ['curl=8.12.1-r0'],
+      archs: ['amd64'],
+    });
+    const parentB = yaml({
+      include: '../../shared/pkgs.yaml',
+      repositories: [alpineMain],
+      packages: ['busybox=1.36.1-r0'],
+      archs: ['amd64'],
+    });
+    const lock = lockJson([{ name: 'bash', version: '5.2.37-r2' }]);
+    mockFiles({
+      'images/a/apko.yaml': parentA,
+      'images/b/apko.yaml': parentB,
+      'shared/pkgs.yaml': shared,
+      'images/a/apko.lock.json': lock,
+      'images/b/apko.lock.json': lock,
+      'shared/pkgs.lock.json': lock,
+    });
+
+    await expect(
+      extractAllPackageFiles({}, [
+        'images/a/apko.yaml',
+        'shared/pkgs.yaml',
+        'images/b/apko.yaml',
+      ]),
+    ).resolves.toEqual([
+      extracted(
+        'images/a/apko.yaml',
+        [
+          pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [
+            registryUrl(alpineCommunity, 'x86_64'),
+            wolfiX86,
+          ]),
+        ],
+        ['images/a/apko.lock.json'],
+      ),
+      extracted(
+        'shared/pkgs.yaml',
+        [
+          {
+            ...pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [
+              registryUrl(alpineCommunity, 'x86_64'),
+              wolfiX86,
+              registryUrl(alpineCommunity, 'aarch64'),
+              registryUrl(alpineMain, 'x86_64'),
+            ]),
+            lockedVersion: '5.2.37-r2',
+          },
+        ],
+        [
+          'images/a/apko.lock.json',
+          'shared/pkgs.lock.json',
+          'images/b/apko.lock.json',
+        ],
+      ),
+      extracted(
+        'images/b/apko.yaml',
+        [
+          pin('busybox=1.36.1-r0', 'busybox', '1.36.1-r0', [
+            registryUrl(alpineCommunity, 'x86_64'),
+            registryUrl(alpineMain, 'x86_64'),
+          ]),
+        ],
+        ['images/b/apko.lock.json'],
+      ),
+    ]);
   });
 });

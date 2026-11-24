@@ -1,4 +1,4 @@
-include: include-nested-mid.yaml
+include: pkgs/mid.yaml
 contents:
   repositories:
     - https://packages.wolfi.dev/os

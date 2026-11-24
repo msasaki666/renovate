@@ -2,7 +2,6 @@ import { quote } from 'shlex';
 import upath from 'upath';
 import { mockDeep } from 'vitest-mock-extended';
 import { mockExecAll } from '~test/exec-util.ts';
-import { Fixtures } from '~test/fixtures.ts';
 import { fs } from '~test/util.ts';
 import { GlobalConfig } from '../../../config/global.ts';
 import type {
@@ -11,13 +10,11 @@ import type {
 } from '../../../config/types.ts';
 import { TEMPORARY_ERROR } from '../../../constants/error-messages.ts';
 import { ExecError } from '../../../util/exec/exec-error.ts';
-import { getFileList } from '../../../util/git/index.ts';
 import { getPkgReleases as _getPkgReleases } from '../../datasource/index.ts';
 import type { UpdateArtifact } from '../types.ts';
 import { updateArtifacts } from './index.ts';
 
 vi.mock('../../../util/fs/index.ts');
-vi.mock('../../../util/git/index.ts');
 vi.mock('../../datasource/index.ts', () => mockDeep());
 
 const getPkgReleases = vi.mocked(_getPkgReleases);
@@ -31,6 +28,27 @@ const adminConfig: RepoGlobalConfig & InternalGlobalConfigOptions = {
 
 function lockCwd(packageFileName: string): string {
   return upath.join(repoDir, upath.dirname(packageFileName));
+}
+
+function mockReads(files: Record<string, string | string[]>): void {
+  const queues = new Map(
+    Object.entries(files).map(([fileName, value]) => [
+      fileName,
+      Array.isArray(value) ? [...value] : [value],
+    ]),
+  );
+  fs.readLocalFile.mockImplementation(
+    (fileName: string): Promise<string | null> => {
+      const queued = queues.get(fileName);
+      if (!queued?.length) {
+        return Promise.resolve(null);
+      }
+      if (queued.length === 1) {
+        return Promise.resolve(queued[0]);
+      }
+      return Promise.resolve(queued.shift() ?? null);
+    },
+  );
 }
 
 function artifact(overrides: Partial<UpdateArtifact> = {}): UpdateArtifact {
@@ -343,47 +361,139 @@ describe('modules/manager/apko/artifacts', () => {
     ]);
   });
 
-  it('regenerates the parent lock when the changed package is included', async () => {
-    const parent = Fixtures.get('include-parent.yaml');
-    const child = Fixtures.get('include-child.yaml');
-    let parentLockReads = 0;
-    vi.mocked(getFileList).mockResolvedValue([
-      'app/apko.yaml',
-      'app/pkgs/apko.yaml',
-    ]);
-    fs.readLocalDirectory.mockImplementation((dir: string) => {
-      const listing: Record<string, string[]> = {
-        '': ['app'],
-        '.': ['app'],
-        app: ['apko.yaml', 'pkgs'],
-        'app/pkgs': ['apko.yaml'],
-      };
-      return Promise.resolve(listing[dir] ?? []);
+  it('regenerates the parent lock named by lockFiles', async () => {
+    // patchConfigForArtifactsUpdate copies packageFile.lockFiles onto
+    // config.lockFiles and calls updateArtifacts with the rewritten file,
+    // which is the child (lib/workers/repository/update/branch/get-updated.ts).
+    mockReads({
+      'app/apko.lock.json': ['old\n', 'new\n'],
+      'app/apko.yaml': 'contents: {}\n',
     });
-    fs.readLocalFile.mockImplementation(
-      (fileName: string): Promise<string | null> => {
-        if (fileName === 'app/apko.yaml') {
-          return Promise.resolve(parent);
-        }
-        if (fileName === 'app/pkgs/apko.yaml') {
-          return Promise.resolve(child);
-        }
-        if (fileName === 'app/apko.lock.json') {
-          parentLockReads += 1;
-          return Promise.resolve(parentLockReads === 1 ? 'old\n' : 'new\n');
-        }
-        return Promise.resolve(null);
-      },
-    );
     const execSnapshots = mockExecAll();
+    const newPackageFileContent =
+      'contents:\n  packages:\n    - bash=5.2.38-r0\n';
 
     await expect(
       updateArtifacts(
         artifact({
           packageFileName: 'app/pkgs/apko.yaml',
           updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
-          newPackageFileContent:
-            'contents:\n  packages:\n    - bash=5.2.38-r0\n',
+          newPackageFileContent,
+          config: { lockFiles: ['app/apko.lock.json'] },
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        file: {
+          type: 'addition',
+          path: 'app/apko.lock.json',
+          contents: 'new\n',
+        },
+      },
+    ]);
+    expect(fs.writeLocalFile).toHaveBeenCalledWith(
+      'app/pkgs/apko.yaml',
+      newPackageFileContent,
+    );
+    expect(execSnapshots).toEqual([
+      expect.objectContaining({
+        cmd: 'apko lock apko.yaml',
+        options: expect.objectContaining({
+          cwd: lockCwd('app/apko.yaml'),
+        }),
+      }),
+    ]);
+  });
+
+  it('locks image.yml when that sibling is the parent config', async () => {
+    mockReads({
+      'dir/image.lock.json': ['old\n', 'new\n'],
+      'dir/image.yml': 'contents: {}\n',
+    });
+    const execSnapshots = mockExecAll();
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'pkgs/extra.yaml',
+          updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
+          config: { lockFiles: ['dir/image.lock.json'] },
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        file: {
+          type: 'addition',
+          path: 'dir/image.lock.json',
+          contents: 'new\n',
+        },
+      },
+    ]);
+    expect(execSnapshots).toEqual([
+      expect.objectContaining({
+        cmd: 'apko lock image.yml',
+        options: expect.objectContaining({
+          cwd: lockCwd('dir/image.yml'),
+        }),
+      }),
+    ]);
+  });
+
+  it('regenerates every parent lock and skips one that is missing', async () => {
+    mockReads({
+      'images/a/apko.yaml': 'contents: {}\n',
+      'images/a/apko.lock.json': ['old-a\n', 'new-a\n'],
+      'images/b/apko.yaml': 'contents: {}\n',
+    });
+    const execSnapshots = mockExecAll();
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'shared/pkgs.yaml',
+          updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
+          config: {
+            lockFiles: ['images/a/apko.lock.json', 'images/b/apko.lock.json'],
+          },
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        file: {
+          type: 'addition',
+          path: 'images/a/apko.lock.json',
+          contents: 'new-a\n',
+        },
+      },
+    ]);
+    expect(execSnapshots).toEqual([
+      expect.objectContaining({
+        cmd: 'apko lock apko.yaml',
+        options: expect.objectContaining({
+          cwd: lockCwd('images/a/apko.yaml'),
+        }),
+      }),
+    ]);
+    expect(fs.readLocalFile.mock.calls.map((call) => call[0])).toContain(
+      'images/b/apko.lock.json',
+    );
+  });
+
+  it('regenerates parent locks during maintenance of the included file', async () => {
+    mockReads({
+      'app/apko.lock.json': ['old\n', 'new\n'],
+      'app/apko.yaml': 'contents: {}\n',
+    });
+    const execSnapshots = mockExecAll();
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'app/pkgs/apko.yaml',
+          config: {
+            isLockFileMaintenance: true,
+            lockFiles: ['app/apko.lock.json'],
+          },
         }),
       ),
     ).resolves.toEqual([
