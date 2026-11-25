@@ -1838,4 +1838,92 @@ archs: []
       ]),
     ]);
   });
+
+  it('keeps a shared @local pin as a local dependency when the file is extracted first', async () => {
+    const shared = yaml({
+      packages: [
+        'demo@local=1.2.3-r0',
+        'nodejs@edge=22.13.1-r0',
+        'bash=5.2.37-r2',
+      ],
+    });
+    const parent = yaml({
+      include: '../../base/apko.yaml',
+      repositories: [`@local /srv/apks`, `@edge ${edgeMain}`, wolfi],
+      packages: ['curl=8.12.1-r0'],
+      archs: ['amd64'],
+    });
+    mockFiles({
+      'base/apko.yaml': shared,
+      'services/api/apko.yaml': parent,
+    });
+    const edge = registryUrl(edgeMain, 'x86_64');
+
+    await expect(
+      extractAllPackageFiles({}, ['base/apko.yaml', 'services/api/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('base/apko.yaml', [
+        {
+          datasource: 'apk',
+          depName: 'demo',
+          skipReason: 'local-dependency',
+        },
+        pin(
+          'nodejs@edge=22.13.1-r0',
+          'nodejs',
+          '22.13.1-r0',
+          [edge, wolfiX86],
+          'nodejs@edge={{{newValue}}}',
+        ),
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
+      ]),
+      extracted('services/api/apko.yaml', [
+        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86]),
+      ]),
+    ]);
+  });
+
+  it('keeps a shared @local pin as a local dependency when the parent is extracted first', async () => {
+    const shared = yaml({
+      packages: [
+        'demo@local=1.2.3-r0',
+        'nodejs@edge=22.13.1-r0',
+        'bash=5.2.37-r2',
+      ],
+    });
+    const parent = yaml({
+      include: '../../base/apko.yaml',
+      repositories: [`@local /srv/apks`, `@edge ${edgeMain}`, wolfi],
+      packages: ['curl=8.12.1-r0'],
+      archs: ['amd64'],
+    });
+    mockFiles({
+      'base/apko.yaml': shared,
+      'services/api/apko.yaml': parent,
+    });
+    const edge = registryUrl(edgeMain, 'x86_64');
+
+    await expect(
+      extractAllPackageFiles({}, ['services/api/apko.yaml', 'base/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('services/api/apko.yaml', [
+        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86]),
+      ]),
+      extracted('base/apko.yaml', [
+        {
+          datasource: 'apk',
+          depName: 'demo',
+          skipReason: 'local-dependency',
+        },
+        pin(
+          'nodejs@edge=22.13.1-r0',
+          'nodejs',
+          '22.13.1-r0',
+          [edge, wolfiX86],
+          'nodejs@edge={{{newValue}}}',
+        ),
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
+      ]),
+    ]);
+  });
 });
