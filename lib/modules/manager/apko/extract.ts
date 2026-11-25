@@ -343,7 +343,16 @@ function addSource(
 ): void {
   for (let index = 0; index < entry.deps.length; index += 1) {
     const dep = entry.deps[index];
-    const extra = registryUrlsFor(entry.tags[index], repositories, archs);
+    const tag = entry.tags[index];
+    if (tag && repositories.fileTags.has(tag)) {
+      entry.deps[index] = {
+        datasource: ApkDatasource.id,
+        depName: dep.depName,
+        skipReason: 'local-dependency',
+      };
+      continue;
+    }
+    const extra = registryUrlsFor(tag, repositories, archs);
     if (dep.registryUrls) {
       unionUrls(dep.registryUrls, extra);
       continue;
