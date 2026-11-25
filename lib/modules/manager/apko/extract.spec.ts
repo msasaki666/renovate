@@ -262,6 +262,25 @@ describe('modules/manager/apko/extract', () => {
     });
   });
 
+  it('uses AllArchs order when archs is an empty list', async () => {
+    await expect(
+      extractPackageFile(
+        `contents:
+  repositories:
+    - ${wolfi}
+  packages:
+    - bash=5.2.37-r2
+archs: []
+`,
+        'apko.yaml',
+      ),
+    ).resolves.toEqual({
+      deps: [
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', wolfiArchs(defaultArchs)),
+      ],
+    });
+  });
+
   it('uses AllArchs order when archs is omitted', async () => {
     await expect(
       extractPackageFile(Fixtures.get('no-archs.yaml'), 'apko.yaml'),
@@ -367,12 +386,57 @@ describe('modules/manager/apko/extract', () => {
     });
   });
 
-  it('skips a versioned package when the file has no repositories', async () => {
+  it('skips a versioned package when repositories is empty and archs is omitted', async () => {
+    await expect(
+      extractPackageFile(
+        yaml({
+          repositories: [],
+          packages: ['bash=5.2.37-r2'],
+        }),
+        'apko.yaml',
+      ),
+    ).resolves.toEqual({
+      deps: [
+        {
+          datasource: 'apk',
+          depName: 'bash',
+          currentValue: '5.2.37-r2',
+          replaceString: 'bash=5.2.37-r2',
+          autoReplaceStringTemplate: 'bash={{{newValue}}}',
+          skipReason: 'unknown-registry',
+        },
+      ],
+    });
+  });
+
+  it('skips a versioned package when the file has no repositories and archs is set', async () => {
     await expect(
       extractPackageFile(
         yaml({
           packages: ['bash=5.2.37-r2'],
           archs: ['amd64'],
+        }),
+        'apko.yaml',
+      ),
+    ).resolves.toEqual({
+      deps: [
+        {
+          datasource: 'apk',
+          depName: 'bash',
+          currentValue: '5.2.37-r2',
+          replaceString: 'bash=5.2.37-r2',
+          autoReplaceStringTemplate: 'bash={{{newValue}}}',
+          skipReason: 'unknown-registry',
+        },
+      ],
+    });
+  });
+
+  it('skips a versioned package when the file has no repositories', async () => {
+    await expect(
+      extractPackageFile(
+        yaml({
+          packages: ['bash=5.2.37-r2'],
         }),
         'apko.yaml',
       ),
@@ -996,7 +1060,7 @@ describe('modules/manager/apko/extract', () => {
     );
   });
 
-  it('extracts an included file alone without the parent repositories', async () => {
+  it('skips an included file extracted alone when it has no repositories', async () => {
     await expect(
       extractPackageFile(Fixtures.get('include-child.yaml'), 'pkgs/apko.yaml'),
     ).resolves.toEqual({
@@ -1007,6 +1071,7 @@ describe('modules/manager/apko/extract', () => {
           currentValue: '5.2.37-r2',
           replaceString: 'bash=5.2.37-r2',
           autoReplaceStringTemplate: 'bash={{{newValue}}}',
+          skipReason: 'unknown-registry',
         },
       ],
     });
