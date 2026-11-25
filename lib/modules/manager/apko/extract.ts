@@ -150,7 +150,9 @@ function indexRepositories(entries: string[]): RepositoryIndex {
       index.httpByTag.set(tag, [...coerceArray(index.httpByTag.get(tag)), url]);
       continue;
     }
-    index.untaggedHttp.push(url);
+    if (!index.untaggedHttp.includes(url)) {
+      index.untaggedHttp.push(url);
+    }
   }
   return index;
 }
@@ -287,13 +289,13 @@ function parseApkoFile(content: string, packageFile: string): ApkoFile | null {
   }
 
   const { contents, archs, include } = parsed.data;
-  const repositories = coerceArray(contents.repositories);
-  const buildRepositories = coerceArray(contents.build_repositories);
+  const repositories = coerceArray(contents?.repositories);
+  const buildRepositories = coerceArray(contents?.build_repositories);
   const fileTags = indexRepositories([
     ...repositories,
     ...buildRepositories,
   ]).fileTags;
-  const specs = contents.packages
+  const specs = coerceArray(contents?.packages)
     .map((spec) => parsePackageSpec(spec, fileTags))
     .filter((spec) => spec.kind !== 'drop');
 
@@ -341,10 +343,11 @@ function addSource(
   archs: string[],
 ): void {
   for (let index = 0; index < entry.deps.length; index += 1) {
-    unionUrls(
-      entry.deps[index].registryUrls!,
-      registryUrlsFor(entry.tags[index], repositories, archs),
-    );
+    const current = entry.deps[index].registryUrls;
+    if (!current) {
+      continue;
+    }
+    unionUrls(current, registryUrlsFor(entry.tags[index], repositories, archs));
   }
 }
 
@@ -419,7 +422,7 @@ async function mergedSources(
   }
   merged.repositories.push(...file.repositories);
   merged.buildRepositories.push(...file.buildRepositories);
-  if (file.archs) {
+  if (file.archs?.length) {
     merged.archs = file.archs;
   }
   stack.delete(packageFile);
@@ -448,10 +451,20 @@ function depsFor(
   const deps: PackageDependency[] = [];
   const tags: (string | null)[] = [];
   for (const spec of file.specs) {
+    const visible =
+      spec.kind === 'versioned' &&
+      spec.tag &&
+      repositories.fileTags.has(spec.tag)
+        ? ({
+            kind: 'skip',
+            depName: spec.depName,
+            skipReason: 'local-dependency',
+          } as const)
+        : spec;
     deps.push(
-      toDependency(spec, repositories, archs, lockPackages, configured),
+      toDependency(visible, repositories, archs, lockPackages, configured),
     );
-    tags.push(spec.kind === 'versioned' ? spec.tag : null);
+    tags.push(visible.kind === 'versioned' ? visible.tag : null);
   }
   return { deps, tags };
 }

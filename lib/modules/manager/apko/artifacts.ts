@@ -17,15 +17,23 @@ import { getLockFileName } from './extract.ts';
 
 const lockSuffix = regEx(/\.lock\.json$/);
 
-async function siblingConfigName(lockFileName: string): Promise<string | null> {
+async function siblingConfigName(
+  lockFileName: string,
+  packageFileName: string,
+): Promise<string | null> {
   const directory = upath.dirname(lockFileName);
   const baseName = upath.basename(lockFileName).replace(lockSuffix, '');
   const yamlName = upath.join(directory, `${baseName}.yaml`);
-  if (await readLocalFile(yamlName, 'utf8')) {
+  const ymlName = upath.join(directory, `${baseName}.yml`);
+  const yaml = await readLocalFile(yamlName, 'utf8');
+  const yml = await readLocalFile(ymlName, 'utf8');
+  if (packageFileName === ymlName && yml) {
+    return ymlName;
+  }
+  if (yaml) {
     return yamlName;
   }
-  const ymlName = upath.join(directory, `${baseName}.yml`);
-  if (await readLocalFile(ymlName, 'utf8')) {
+  if (yml) {
     return ymlName;
   }
   return null;
@@ -80,7 +88,10 @@ export async function updateArtifacts({
   if (config.lockFiles?.length) {
     const results: UpdateArtifactsResult[] = [];
     for (const lockFileName of config.lockFiles) {
-      const configFileName = await siblingConfigName(lockFileName);
+      const configFileName = await siblingConfigName(
+        lockFileName,
+        packageFileName,
+      );
       if (!configFileName) {
         continue;
       }
