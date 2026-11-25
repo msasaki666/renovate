@@ -634,4 +634,44 @@ describe('modules/manager/apko/artifacts', () => {
     ).resolves.toBeNull();
     expect(execSnapshots).toEqual([]);
   });
+
+  it('locks apko.yml when that file is updated beside apko.yaml', async () => {
+    mockReads({
+      'apko.yaml': 'contents: {}\n',
+      'apko.yml': 'contents: {}\n',
+      'apko.lock.json': ['old\n', 'new\n'],
+    });
+    const execSnapshots = mockExecAll();
+    const newPackageFileContent =
+      'contents:\n  packages:\n    - bash=5.2.38-r0\n';
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'apko.yml',
+          updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
+          newPackageFileContent,
+          config: { lockFiles: ['apko.lock.json'] },
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        file: {
+          type: 'addition',
+          path: 'apko.lock.json',
+          contents: 'new\n',
+        },
+      },
+    ]);
+    expect(fs.writeLocalFile).toHaveBeenCalledWith(
+      'apko.yml',
+      newPackageFileContent,
+    );
+    expect(execSnapshots).toEqual([
+      expect.objectContaining({
+        cmd: 'apko lock apko.yml',
+        options: expect.objectContaining({ cwd: repoDir }),
+      }),
+    ]);
+  });
 });

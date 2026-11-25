@@ -1471,4 +1471,159 @@ describe('modules/manager/apko/extract', () => {
       ),
     ]);
   });
+
+  it('merges a shared file that contains an unversioned package twice', async () => {
+    const shared = yaml({
+      repositories: [wolfi],
+      packages: ['ca-certificates', 'bash=5.2.37-r2'],
+      archs: ['amd64'],
+    });
+    const parentA = yaml({
+      include: '../../shared/pkgs.yaml',
+      repositories: [wolfi],
+      packages: ['curl=8.12.1-r0'],
+      archs: ['amd64'],
+    });
+    const parentB = yaml({
+      include: '../../shared/pkgs.yaml',
+      repositories: [wolfi],
+      packages: ['busybox=1.36.1-r0'],
+      archs: ['amd64'],
+    });
+    mockFiles({
+      'images/a/apko.yaml': parentA,
+      'images/b/apko.yaml': parentB,
+      'shared/pkgs.yaml': shared,
+    });
+
+    await expect(
+      extractAllPackageFiles({}, ['images/a/apko.yaml', 'images/b/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('images/a/apko.yaml', [
+        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86]),
+      ]),
+      extracted('shared/pkgs.yaml', [
+        {
+          datasource: 'apk',
+          depName: 'ca-certificates',
+          skipReason: 'unspecified-version',
+        },
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
+      ]),
+      extracted('images/b/apko.yaml', [
+        pin('busybox=1.36.1-r0', 'busybox', '1.36.1-r0', [wolfiX86]),
+      ]),
+    ]);
+  });
+
+  it('uses repositories from an include that omits packages', async () => {
+    mockFiles({
+      'app/apko.yaml': `include: repos.yaml
+contents:
+  packages:
+    - bash=5.2.37-r2
+archs:
+  - amd64
+`,
+      'app/repos.yaml': `contents:
+  repositories:
+    - ${wolfi}
+`,
+    });
+
+    await expect(
+      extractAllPackageFiles({}, ['app/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('app/apko.yaml', [
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
+      ]),
+    ]);
+  });
+
+  it('follows an include through a file that has no contents', async () => {
+    mockFiles({
+      'app/apko.yaml': `include: wrap.yaml
+contents:
+  packages:
+    - curl=8.12.1-r0
+archs:
+  - amd64
+`,
+      'app/wrap.yaml': 'include: base.yaml\n',
+      'app/base.yaml': yaml({
+        repositories: [wolfi],
+        packages: ['bash=5.2.37-r2'],
+        archs: ['amd64'],
+      }),
+    });
+
+    await expect(
+      extractAllPackageFiles({}, ['app/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('app/apko.yaml', [
+        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86]),
+      ]),
+      extracted('app/base.yaml', [
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
+      ]),
+    ]);
+  });
+
+  it('treats a parent file tag as a local dependency of the child', async () => {
+    const parent = yaml({
+      include: 'pkgs.yaml',
+      repositories: ['@local /srv/apks', wolfi],
+      packages: ['curl=8.12.1-r0'],
+      archs: ['amd64'],
+    });
+    const child = yaml({
+      packages: ['demo@local=1.2.3-r0'],
+    });
+    mockFiles({
+      'app/apko.yaml': parent,
+      'app/pkgs.yaml': child,
+    });
+
+    await expect(
+      extractAllPackageFiles({}, ['app/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('app/apko.yaml', [
+        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86]),
+      ]),
+      extracted('app/pkgs.yaml', [
+        {
+          datasource: 'apk',
+          depName: 'demo',
+          skipReason: 'local-dependency',
+        },
+      ]),
+    ]);
+  });
+
+  it('keeps included architectures when the parent arch list is empty', async () => {
+    mockFiles({
+      'app/apko.yaml': `include: base.yaml
+contents:
+  packages:
+    - curl=8.12.1-r0
+archs: []
+`,
+      'app/base.yaml': yaml({
+        repositories: [wolfi],
+        packages: ['bash=5.2.37-r2'],
+        archs: ['amd64'],
+      }),
+    });
+
+    await expect(
+      extractAllPackageFiles({}, ['app/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('app/apko.yaml', [
+        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86]),
+      ]),
+      extracted('app/base.yaml', [
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
+      ]),
+    ]);
+  });
 });
