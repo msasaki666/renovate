@@ -268,7 +268,7 @@ interface IncludedEntry {
   packageFile: string;
   file: ApkoFile;
   deps: PackageDependency[];
-  registryUrls: string[];
+  tags: (string | null)[];
   lockFiles: string[];
   lockPackages: ApkoLockPackage[];
 }
@@ -293,10 +293,6 @@ function parseApkoFile(content: string, packageFile: string): ApkoFile | null {
   const specs = contents.packages
     .map((spec) => parsePackageSpec(spec, fileTags))
     .filter((spec) => spec.kind !== 'drop');
-  if (!specs.length) {
-    logger.debug(`No apk packages found in ${packageFile}`);
-    return null;
-  }
 
   return { include, repositories, buildRepositories, archs, specs };
 }
@@ -336,10 +332,16 @@ function unionUrls(target: string[], extra: string[]): void {
   }
 }
 
-function applyRegistryUrls(entry: IncludedEntry): void {
-  const registryUrls = [...entry.registryUrls];
-  for (const dep of entry.deps) {
-    dep.registryUrls = registryUrls;
+function addSource(
+  entry: IncludedEntry,
+  repositories: RepositoryIndex,
+  archs: string[],
+): void {
+  for (let index = 0; index < entry.deps.length; index += 1) {
+    unionUrls(
+      entry.deps[index].registryUrls!,
+      registryUrlsFor(entry.tags[index], repositories, archs),
+    );
   }
 }
 
@@ -421,27 +423,19 @@ async function mergedSources(
   return merged;
 }
 
-function expandedUrls(
-  repositories: string[],
-  buildRepositories: string[],
-  archs: string[] | undefined,
-): string[] {
-  return registryUrlsFor(
-    null,
-    repositoryIndex(repositories, buildRepositories),
-    apkArchsFor(archs),
-  );
-}
-
 function depsFor(
   file: ApkoFile,
   repositories: RepositoryIndex,
   archs: string[],
   lockPackages: ApkoLockPackage[],
-): PackageDependency[] {
-  return file.specs.map((spec) =>
-    toDependency(spec, repositories, archs, lockPackages),
-  );
+): { deps: PackageDependency[]; tags: (string | null)[] } {
+  const deps: PackageDependency[] = [];
+  const tags: (string | null)[] = [];
+  for (const spec of file.specs) {
+    deps.push(toDependency(spec, repositories, archs, lockPackages));
+    tags.push(spec.kind === 'versioned' ? spec.tag : null);
+  }
+  return { deps, tags };
 }
 
 export async function extractPackageFile(
@@ -452,6 +446,10 @@ export async function extractPackageFile(
   if (!file) {
     return null;
   }
+  if (!file.specs.length) {
+    logger.debug(`No apk packages found in ${packageFile}`);
+    return null;
+  }
 
   const repositories = repositoryIndex(
     file.repositories,
@@ -460,7 +458,12 @@ export async function extractPackageFile(
   const apkArchs = apkArchsFor(file.archs);
   const lockFileName = getLockFileName(packageFile);
   const lockPackages = await readLockPackages(lockFileName, packageFile);
-  const deps = depsFor(file, repositories, apkArchs, coerceArray(lockPackages));
+  const { deps } = depsFor(
+    file,
+    repositories,
+    apkArchs,
+    coerceArray(lockPackages),
+  );
   if (!lockPackages) {
     return { deps };
   }
@@ -487,16 +490,15 @@ export async function extractAllPackageFiles(
   const order: IncludedEntry[] = [];
 
   async function appendStandalone(entry: IncludedEntry): Promise<void> {
-    unionUrls(
-      entry.registryUrls,
-      expandedUrls(
-        entry.file.repositories,
-        entry.file.buildRepositories,
-        entry.file.archs,
-      ),
+    addSource(
+      entry,
+      repositoryIndex(entry.file.repositories, entry.file.buildRepositories),
+      apkArchsFor(entry.file.archs),
     );
-    applyRegistryUrls(entry);
-    addLock(entry, (await readLock(entry.packageFile))!);
+    const lock = await readLock(entry.packageFile);
+    if (lock) {
+      addLock(entry, lock);
+    }
   }
 
   async function visit(
@@ -504,7 +506,6 @@ export async function extractAllPackageFiles(
     rootDir: string,
     repositories: RepositoryIndex,
     archs: string[],
-    registryUrls: string[],
     rootLock: LockRecord | null,
     stack: Set<string>,
   ): Promise<void> {
@@ -517,39 +518,34 @@ export async function extractAllPackageFiles(
     }
     stack.add(packageFile);
 
-    const existing = entries.get(packageFile);
-    if (existing) {
-      unionUrls(existing.registryUrls, registryUrls);
-      applyRegistryUrls(existing);
-      addLock(existing, rootLock!);
-    } else {
-      const entry: IncludedEntry = {
-        packageFile,
-        file,
-        deps: depsFor(file, repositories, archs, []),
-        registryUrls,
-        lockFiles: [],
-        lockPackages: [],
-      };
-      applyRegistryUrls(entry);
-      if (rootLock) {
-        addLock(entry, rootLock);
+    if (file.specs.length) {
+      const existing = entries.get(packageFile);
+      if (existing) {
+        addSource(existing, repositories, archs);
+        if (rootLock) {
+          addLock(existing, rootLock);
+        }
+      } else {
+        const { deps, tags } = depsFor(file, repositories, archs, []);
+        const entry: IncludedEntry = {
+          packageFile,
+          file,
+          deps,
+          tags,
+          lockFiles: [],
+          lockPackages: [],
+        };
+        if (rootLock) {
+          addLock(entry, rootLock);
+        }
+        entries.set(packageFile, entry);
+        order.push(entry);
       }
-      entries.set(packageFile, entry);
-      order.push(entry);
     }
 
     const child = includedPath(rootDir, file.include);
     if (child) {
-      await visit(
-        child,
-        rootDir,
-        repositories,
-        archs,
-        registryUrls,
-        rootLock,
-        stack,
-      );
+      await visit(child, rootDir, repositories, archs, rootLock, stack);
     }
     stack.delete(packageFile);
   }
@@ -573,7 +569,6 @@ export async function extractAllPackageFiles(
       rootDir,
       repositories,
       archs,
-      expandedUrls(merged.repositories, merged.buildRepositories, merged.archs),
       await readLock(packageFile),
       new Set(),
     );
