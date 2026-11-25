@@ -158,7 +158,7 @@ function indexRepositories(entries: string[]): RepositoryIndex {
 }
 
 function requestedArchs(archs: string[] | undefined): string[] {
-  if (archs === undefined) {
+  if (!archs?.length) {
     return allArchs;
   }
   if (archs.length === 1 && archs[0] === 'all') {
@@ -200,7 +200,6 @@ function toDependency(
   repositories: RepositoryIndex,
   apkArchs: string[],
   lockPackages: ApkoLockPackage[],
-  registryWasConfigured: boolean,
 ): PackageDependency {
   if (spec.kind === 'skip') {
     return {
@@ -220,7 +219,7 @@ function toDependency(
   const registryUrls = registryUrlsFor(spec.tag, repositories, apkArchs);
   if (isNonEmptyArray(registryUrls)) {
     dep.registryUrls = registryUrls;
-  } else if (registryWasConfigured) {
+  } else {
     dep.skipReason = 'unknown-registry';
   }
   const lockedVersion = lockedVersionOf(spec.depName, lockPackages);
@@ -429,24 +428,11 @@ async function mergedSources(
   return merged;
 }
 
-function registryConfigured(source: {
-  repositories: string[];
-  buildRepositories: string[];
-  archs?: string[];
-}): boolean {
-  return (
-    source.repositories.length > 0 ||
-    source.buildRepositories.length > 0 ||
-    source.archs !== undefined
-  );
-}
-
 function depsFor(
   file: ApkoFile,
   repositories: RepositoryIndex,
   archs: string[],
   lockPackages: ApkoLockPackage[],
-  configured: boolean,
 ): { deps: PackageDependency[]; tags: (string | null)[] } {
   const deps: PackageDependency[] = [];
   const tags: (string | null)[] = [];
@@ -461,9 +447,7 @@ function depsFor(
             skipReason: 'local-dependency',
           } as const)
         : spec;
-    deps.push(
-      toDependency(visible, repositories, archs, lockPackages, configured),
-    );
+    deps.push(toDependency(visible, repositories, archs, lockPackages));
     tags.push(visible.kind === 'versioned' ? visible.tag : null);
   }
   return { deps, tags };
@@ -494,7 +478,6 @@ export async function extractPackageFile(
     repositories,
     apkArchs,
     coerceArray(lockPackages),
-    registryConfigured(file),
   );
   if (!lockPackages) {
     return { deps };
@@ -538,7 +521,6 @@ export async function extractAllPackageFiles(
     rootDir: string,
     repositories: RepositoryIndex,
     archs: string[],
-    configured: boolean,
     rootLock: LockRecord | null,
     stack: Set<string>,
   ): Promise<void> {
@@ -559,13 +541,7 @@ export async function extractAllPackageFiles(
           addLock(existing, rootLock);
         }
       } else {
-        const { deps, tags } = depsFor(
-          file,
-          repositories,
-          archs,
-          [],
-          configured,
-        );
+        const { deps, tags } = depsFor(file, repositories, archs, []);
         const entry: IncludedEntry = {
           packageFile,
           file,
@@ -584,15 +560,7 @@ export async function extractAllPackageFiles(
 
     const child = includedPath(rootDir, file.include);
     if (child) {
-      await visit(
-        child,
-        rootDir,
-        repositories,
-        archs,
-        configured,
-        rootLock,
-        stack,
-      );
+      await visit(child, rootDir, repositories, archs, rootLock, stack);
     }
     stack.delete(packageFile);
   }
@@ -616,7 +584,6 @@ export async function extractAllPackageFiles(
       rootDir,
       repositories,
       archs,
-      registryConfigured(merged),
       await readLock(packageFile),
       new Set(),
     );
