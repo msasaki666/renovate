@@ -1691,4 +1691,72 @@ archs: []
       ]),
     ]);
   });
+
+  it('adds a later parent repository to a shared file that was extracted first', async () => {
+    const shared = yaml({
+      packages: ['ca-certificates', 'bash=5.2.37-r2'],
+    });
+    const parent = yaml({
+      include: '../../base/apko.yaml',
+      repositories: [wolfi],
+      packages: ['curl=8.12.1-r0'],
+      archs: ['amd64'],
+    });
+    mockFiles({
+      'base/apko.yaml': shared,
+      'services/api/apko.yaml': parent,
+    });
+
+    await expect(
+      extractAllPackageFiles({}, ['base/apko.yaml', 'services/api/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('base/apko.yaml', [
+        {
+          datasource: 'apk',
+          depName: 'ca-certificates',
+          skipReason: 'unspecified-version',
+        },
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
+      ]),
+      extracted('services/api/apko.yaml', [
+        pin('curl=8.12.1-r0', 'curl', '8.12.1-r0', [wolfiX86]),
+      ]),
+    ]);
+  });
+
+  it('skips a shared package when no parent has a repository', async () => {
+    const shared = yaml({
+      packages: ['bash=5.2.37-r2'],
+    });
+    const parent = yaml({
+      include: '../../base/apko.yaml',
+      packages: ['curl=8.12.1-r0'],
+    });
+    mockFiles({
+      'base/apko.yaml': shared,
+      'services/api/apko.yaml': parent,
+    });
+    const skipped = {
+      datasource: 'apk',
+      currentValue: '5.2.37-r2',
+      replaceString: 'bash=5.2.37-r2',
+      autoReplaceStringTemplate: 'bash={{{newValue}}}',
+      skipReason: 'unknown-registry',
+    };
+
+    await expect(
+      extractAllPackageFiles({}, ['base/apko.yaml', 'services/api/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('base/apko.yaml', [{ ...skipped, depName: 'bash' }]),
+      extracted('services/api/apko.yaml', [
+        {
+          ...skipped,
+          depName: 'curl',
+          currentValue: '8.12.1-r0',
+          replaceString: 'curl=8.12.1-r0',
+          autoReplaceStringTemplate: 'curl={{{newValue}}}',
+        },
+      ]),
+    ]);
+  });
 });
