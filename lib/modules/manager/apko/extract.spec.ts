@@ -1742,7 +1742,7 @@ archs: []
       replaceString: 'bash=5.2.37-r2',
       autoReplaceStringTemplate: 'bash={{{newValue}}}',
       skipReason: 'unknown-registry',
-    };
+    } as const;
 
     await expect(
       extractAllPackageFiles({}, ['base/apko.yaml', 'services/api/apko.yaml']),
