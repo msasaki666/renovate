@@ -343,7 +343,7 @@ describe('modules/manager/apko/extract', () => {
     });
   });
 
-  it('extracts a pin with no registryUrls when every repository has a query', async () => {
+  it('skips a versioned package when every repository URL has a query', async () => {
     await expect(
       extractPackageFile(
         yaml({
@@ -361,6 +361,30 @@ describe('modules/manager/apko/extract', () => {
           currentValue: '5.2.37-r2',
           replaceString: 'bash=5.2.37-r2',
           autoReplaceStringTemplate: 'bash={{{newValue}}}',
+          skipReason: 'unknown-registry',
+        },
+      ],
+    });
+  });
+
+  it('skips a versioned package when the file has no repositories', async () => {
+    await expect(
+      extractPackageFile(
+        yaml({
+          packages: ['bash=5.2.37-r2'],
+          archs: ['amd64'],
+        }),
+        'apko.yaml',
+      ),
+    ).resolves.toEqual({
+      deps: [
+        {
+          datasource: 'apk',
+          depName: 'bash',
+          currentValue: '5.2.37-r2',
+          replaceString: 'bash=5.2.37-r2',
+          autoReplaceStringTemplate: 'bash={{{newValue}}}',
+          skipReason: 'unknown-registry',
         },
       ],
     });
