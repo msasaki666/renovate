@@ -342,11 +342,17 @@ function addSource(
   archs: string[],
 ): void {
   for (let index = 0; index < entry.deps.length; index += 1) {
-    const current = entry.deps[index].registryUrls;
-    if (!current) {
+    const dep = entry.deps[index];
+    const extra = registryUrlsFor(entry.tags[index], repositories, archs);
+    if (dep.registryUrls) {
+      unionUrls(dep.registryUrls, extra);
       continue;
     }
-    unionUrls(current, registryUrlsFor(entry.tags[index], repositories, archs));
+    if (!extra.length || dep.currentValue === undefined) {
+      continue;
+    }
+    dep.registryUrls = extra;
+    delete dep.skipReason;
   }
 }
 
