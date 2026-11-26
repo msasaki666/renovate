@@ -1040,9 +1040,6 @@ archs:
   });
 
   it('merges included repositories before the parent and keeps the parent archs', async () => {
-    // Included lists are placed before the parent lists, and parent archs win
-    // when set. ImageContents.MergeInto and ImageConfiguration.MergeInto in
-    // chainguard-dev/apko pkg/build/types/image_configuration.go.
     const child = yaml({
       repositories: [alpineMain, 'https://mirror.example.com/os?token=secret'],
       buildRepositories: [chainguard],
