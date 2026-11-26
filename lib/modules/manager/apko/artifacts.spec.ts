@@ -362,9 +362,6 @@ describe('modules/manager/apko/artifacts', () => {
   });
 
   it('regenerates the parent lock named by lockFiles', async () => {
-    // patchConfigForArtifactsUpdate copies packageFile.lockFiles onto
-    // config.lockFiles and calls updateArtifacts with the rewritten file,
-    // which is the child (lib/workers/repository/update/branch/get-updated.ts).
     mockReads({
       'app/apko.lock.json': ['old\n', 'new\n'],
       'app/apko.yaml': 'contents: {}\n',
@@ -516,9 +513,6 @@ describe('modules/manager/apko/artifacts', () => {
   });
 
   it('returns the regenerated lock and an artifact error when another lock fails', async () => {
-    // UpdateArtifactsResult is one file or one artifactError per entry.
-    // pip-compile pushes both into the same array
-    // (lib/modules/manager/pip-compile/artifacts.ts).
     mockReads({
       'images/a/apko.yaml': 'contents: {}\n',
       'images/a/apko.lock.json': ['old-a\n', 'new-a\n'],
@@ -563,8 +557,6 @@ describe('modules/manager/apko/artifacts', () => {
   });
 
   it('returns null when every configured lock file is missing', async () => {
-    // A single missing lock returns null. pip-compile returns null when its
-    // result list is empty. An empty array is not that result.
     mockReads({
       'images/a/apko.yaml': 'contents: {}\n',
       'images/b/apko.yaml': 'contents: {}\n',

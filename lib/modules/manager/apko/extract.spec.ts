@@ -924,14 +924,6 @@ archs:
   });
 
   it('keeps an included package on its own file with the parent lock', async () => {
-    // getManagerPackageFiles uses extractAllPackageFiles and does not also
-    // call extractPackageFile
-    // (lib/workers/repository/extract/manager-files.ts). gradle returns one
-    // PackageFile per owning file. Renovate rewrites that file's contents, so
-    // a version that lives in the child cannot be updated from the parent
-    // entry. patchConfigForArtifactsUpdate
-    // (lib/workers/repository/update/branch/get-updated.ts) copies the child
-    // entry's lockFiles onto config.lockFiles before updateArtifacts.
     const parent = Fixtures.get('include-parent.yaml');
     const child = Fixtures.get('include-child.yaml');
     const lock = lockJson([
@@ -971,9 +963,6 @@ archs:
   });
 
   it('merges included repositories before the parent and keeps the parent archs', async () => {
-    // Included lists are placed before the parent lists, and parent archs win
-    // when set. ImageContents.MergeInto and ImageConfiguration.MergeInto in
-    // chainguard-dev/apko pkg/build/types/image_configuration.go.
     const child = yaml({
       repositories: [alpineMain, 'https://mirror.example.com/os?token=secret'],
       buildRepositories: [chainguard],
@@ -1071,8 +1060,6 @@ archs:
   });
 
   it('extracts each file once when includes form a cycle', async () => {
-    // ImageConfiguration.parse loads the include recursively and has no
-    // visited set (chainguard-dev/apko pkg/build/types/image_configuration.go).
     mockFiles({
       'cycle/a.yaml': Fixtures.get('include-cycle-a.yaml'),
       'cycle/b.yaml': Fixtures.get('include-cycle-b.yaml'),
@@ -1172,11 +1159,6 @@ archs:
   });
 
   it('lists one child for every parent and unions registry URLs in parent order', async () => {
-    // One child entry. lockFiles lists every root lock, in matched-file
-    // order. registryUrls is the union of each parent's merged list in that
-    // order. updateArtifacts runs once for the child and receives every
-    // lock file (get-updated.ts patchConfigForArtifactsUpdate). pip-compile
-    // walks config.lockFiles and returns one result per lock.
     const shared = yaml({
       repositories: [alpineCommunity],
       packages: ['bash=5.2.37-r2'],
@@ -1323,9 +1305,6 @@ archs:
   });
 
   it('returns null when no package file has dependencies', async () => {
-    // gradle's extractAllPackageFiles returns null when it extracts nothing.
-    // getManagerPackageFiles returns that null
-    // (lib/workers/repository/extract/manager-files.ts).
     mockFiles({
       'empty.yaml': yaml({
         repositories: [wolfi],
@@ -1344,10 +1323,6 @@ archs:
   });
 
   it('emits a matched include once and appends its own lock and registries', async () => {
-    // shared/pkgs.yaml also matches as a root. A second entry would list
-    // bash twice. The entry recorded for the first parent keeps one dep.
-    // Visiting the matched file appends its own lock and any standalone
-    // registry URL that is not already present.
     const shared = yaml({
       repositories: [alpineCommunity],
       packages: ['bash=5.2.37-r2'],
