@@ -1941,4 +1941,67 @@ archs: []
       ]),
     ]);
   });
+
+  it('reads repositories from an include whose packages key is null', async () => {
+    const parent = `include: repos.yaml
+contents:
+  packages:
+    - bash=5.2.37-r2
+archs:
+  - amd64
+`;
+    const expected = [
+      extracted('app/apko.yaml', [
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
+      ]),
+    ];
+    mockFiles({
+      'app/apko.yaml': parent,
+      'app/repos.yaml': `contents:
+  repositories:
+    - ${wolfi}
+  packages:
+`,
+    });
+
+    await expect(
+      extractAllPackageFiles({}, ['app/apko.yaml']),
+    ).resolves.toEqual(expected);
+
+    mockFiles({
+      'app/apko.yaml': parent,
+      'app/repos.yaml': `contents:
+  repositories:
+    - ${wolfi}
+`,
+    });
+
+    await expect(
+      extractAllPackageFiles({}, ['app/apko.yaml']),
+    ).resolves.toEqual(expected);
+  });
+
+  it('extracts included packages when the parent packages key is null', async () => {
+    mockFiles({
+      'app/apko.yaml': `include: pkgs/child.yaml
+contents:
+  repositories:
+    - ${wolfi}
+  packages:
+archs:
+  - amd64
+`,
+      'app/pkgs/child.yaml': yaml({
+        packages: ['bash=5.2.37-r2'],
+      }),
+    });
+
+    await expect(
+      extractAllPackageFiles({}, ['app/apko.yaml']),
+    ).resolves.toEqual([
+      extracted('app/pkgs/child.yaml', [
+        pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
+      ]),
+    ]);
+  });
 });
