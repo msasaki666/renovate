@@ -367,6 +367,10 @@ function addSource(
 
 function refreshLockedVersions(entry: IncludedEntry): void {
   for (const dep of entry.deps) {
+    if (dep.currentValue === undefined) {
+      delete dep.lockedVersion;
+      continue;
+    }
     const lockedVersion = lockedVersionOf(dep.depName!, entry.lockPackages);
     if (lockedVersion) {
       dep.lockedVersion = lockedVersion;

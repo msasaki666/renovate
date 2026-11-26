@@ -923,6 +923,83 @@ archs:
     ]);
   });
 
+  it('omits lockedVersion on skipped packages when a lock is present', async () => {
+    mockFiles({
+      'apko.yaml': yaml({
+        repositories: [wolfi, '@local /packages'],
+        packages: [
+          'wolfi-base',
+          'curl',
+          'bash=5.2.37-r2',
+          'libpcap=1.9.1-r0@local',
+        ],
+        archs: ['amd64'],
+      }),
+      'apko.lock.json': lockJson([
+        { name: 'wolfi-base', version: '1-r8' },
+        { name: 'curl', version: '8.23.0-r4' },
+        { name: 'bash', version: '5.2.37-r2' },
+        { name: 'libpcap', version: '1.9.1-r0' },
+      ]),
+    });
+
+    await expect(extractAllPackageFiles({}, ['apko.yaml'])).resolves.toEqual([
+      extracted(
+        'apko.yaml',
+        [
+          {
+            datasource: 'apk',
+            depName: 'wolfi-base',
+            skipReason: 'unspecified-version',
+          },
+          {
+            datasource: 'apk',
+            depName: 'curl',
+            skipReason: 'unspecified-version',
+          },
+          {
+            ...pin('bash=5.2.37-r2', 'bash', '5.2.37-r2', [wolfiX86]),
+            lockedVersion: '5.2.37-r2',
+          },
+          {
+            datasource: 'apk',
+            depName: 'libpcap',
+            skipReason: 'local-dependency',
+          },
+        ],
+        ['apko.lock.json'],
+      ),
+    ]);
+  });
+
+  it('sets lockedVersion on an unknown-registry pin when a lock is present', async () => {
+    mockFiles({
+      'apko.yaml': yaml({
+        packages: ['bash=5.2.37-r2'],
+        archs: ['amd64'],
+      }),
+      'apko.lock.json': lockJson([{ name: 'bash', version: '5.2.37-r2' }]),
+    });
+
+    await expect(extractAllPackageFiles({}, ['apko.yaml'])).resolves.toEqual([
+      extracted(
+        'apko.yaml',
+        [
+          {
+            datasource: 'apk',
+            depName: 'bash',
+            currentValue: '5.2.37-r2',
+            replaceString: 'bash=5.2.37-r2',
+            autoReplaceStringTemplate: 'bash={{{newValue}}}',
+            skipReason: 'unknown-registry',
+            lockedVersion: '5.2.37-r2',
+          },
+        ],
+        ['apko.lock.json'],
+      ),
+    ]);
+  });
+
   it('keeps an included package on its own file with the parent lock', async () => {
     const parent = Fixtures.get('include-parent.yaml');
     const child = Fixtures.get('include-child.yaml');
