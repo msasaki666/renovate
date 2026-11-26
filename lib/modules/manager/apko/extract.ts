@@ -7,7 +7,12 @@ import { regEx } from '../../../util/regex.ts';
 import { isHttpUrl } from '../../../util/url.ts';
 import { ApkDatasource } from '../../datasource/apk/index.ts';
 import { api as apkVersioning } from '../../versioning/apk/index.ts';
-import type { PackageDependency, PackageFileContent } from '../types.ts';
+import type {
+  ExtractConfig,
+  PackageDependency,
+  PackageFile,
+  PackageFileContent,
+} from '../types.ts';
 import { ApkoConfig, ApkoLock, type ApkoLockPackage } from './schema.ts';
 
 type SpecSkipReason =
@@ -145,7 +150,9 @@ function indexRepositories(entries: string[]): RepositoryIndex {
       index.httpByTag.set(tag, [...coerceArray(index.httpByTag.get(tag)), url]);
       continue;
     }
-    index.untaggedHttp.push(url);
+    if (!index.untaggedHttp.includes(url)) {
+      index.untaggedHttp.push(url);
+    }
   }
   return index;
 }
@@ -242,10 +249,35 @@ async function readLockPackages(
   return lock.data.contents.packages;
 }
 
-export async function extractPackageFile(
-  content: string,
-  packageFile: string,
-): Promise<PackageFileContent | null> {
+interface ApkoFile {
+  include?: string;
+  repositories: string[];
+  buildRepositories: string[];
+  archs?: string[];
+  specs: (SkippedSpec | VersionedSpec)[];
+}
+
+interface MergedSources {
+  repositories: string[];
+  buildRepositories: string[];
+  archs?: string[];
+}
+
+interface LockRecord {
+  lockFileName: string;
+  packages: ApkoLockPackage[];
+}
+
+interface IncludedEntry {
+  packageFile: string;
+  file: ApkoFile;
+  deps: PackageDependency[];
+  tags: (string | null)[];
+  lockFiles: string[];
+  lockPackages: ApkoLockPackage[];
+}
+
+function parseApkoFile(content: string, packageFile: string): ApkoFile | null {
   const parsed = ApkoConfig.safeParse(content);
   if (!parsed.success) {
     logger.debug(
@@ -255,30 +287,329 @@ export async function extractPackageFile(
     return null;
   }
 
-  const { contents, archs } = parsed.data;
-  const repositoryEntries = [
-    ...coerceArray(contents.repositories),
-    ...coerceArray(contents.build_repositories),
-  ];
-  const repositories = indexRepositories(repositoryEntries);
-  const specs = contents.packages
-    .map((spec) => parsePackageSpec(spec, repositories.fileTags))
+  const { contents, archs, include } = parsed.data;
+  const repositories = coerceArray(contents?.repositories);
+  const buildRepositories = coerceArray(contents?.build_repositories);
+  const fileTags = indexRepositories([
+    ...repositories,
+    ...buildRepositories,
+  ]).fileTags;
+  const specs = coerceArray(contents?.packages)
+    .map((spec) => parsePackageSpec(spec, fileTags))
     .filter((spec) => spec.kind !== 'drop');
-  if (!specs.length) {
+
+  return { include, repositories, buildRepositories, archs, specs };
+}
+
+function apkArchsFor(archs: string[] | undefined): string[] {
+  return requestedArchs(archs).map(
+    (arch) => apkArchByApkoArch.get(arch) ?? arch,
+  );
+}
+
+function repositoryIndex(
+  repositories: string[],
+  buildRepositories: string[],
+): RepositoryIndex {
+  return indexRepositories([...repositories, ...buildRepositories]);
+}
+
+function includedPath(
+  rootDir: string,
+  includePath: string | undefined,
+): string | null {
+  if (!includePath || upath.isAbsolute(includePath)) {
+    return null;
+  }
+  const resolved = upath.normalize(upath.join(rootDir, includePath));
+  if (resolved.startsWith('..')) {
+    return null;
+  }
+  return resolved;
+}
+
+function unionUrls(target: string[], extra: string[]): void {
+  for (const url of extra) {
+    if (!target.includes(url)) {
+      target.push(url);
+    }
+  }
+}
+
+function addSource(
+  entry: IncludedEntry,
+  repositories: RepositoryIndex,
+  archs: string[],
+): void {
+  for (let index = 0; index < entry.deps.length; index += 1) {
+    const dep = entry.deps[index];
+    const tag = entry.tags[index];
+    if (tag && repositories.fileTags.has(tag)) {
+      entry.deps[index] = {
+        datasource: ApkDatasource.id,
+        depName: dep.depName,
+        skipReason: 'local-dependency',
+      };
+      continue;
+    }
+    const extra = registryUrlsFor(tag, repositories, archs);
+    if (dep.registryUrls) {
+      unionUrls(dep.registryUrls, extra);
+      continue;
+    }
+    if (!extra.length || dep.currentValue === undefined) {
+      continue;
+    }
+    dep.registryUrls = extra;
+    delete dep.skipReason;
+  }
+}
+
+function refreshLockedVersions(entry: IncludedEntry): void {
+  for (const dep of entry.deps) {
+    if (dep.currentValue === undefined) {
+      delete dep.lockedVersion;
+      continue;
+    }
+    const lockedVersion = lockedVersionOf(dep.depName!, entry.lockPackages);
+    if (lockedVersion) {
+      dep.lockedVersion = lockedVersion;
+    } else {
+      delete dep.lockedVersion;
+    }
+  }
+}
+
+function addLock(entry: IncludedEntry, lock: LockRecord): void {
+  entry.lockFiles.push(lock.lockFileName);
+  entry.lockPackages.push(...lock.packages);
+  refreshLockedVersions(entry);
+}
+
+async function readApkoFile(
+  packageFile: string,
+  cache: Map<string, ApkoFile>,
+): Promise<ApkoFile | null> {
+  const cached = cache.get(packageFile);
+  if (cached) {
+    return cached;
+  }
+  const content = await readLocalFile(packageFile, 'utf8');
+  const file = content ? parseApkoFile(content, packageFile) : null;
+  if (!file) {
+    return null;
+  }
+  cache.set(packageFile, file);
+  return file;
+}
+
+async function readLock(packageFile: string): Promise<LockRecord | null> {
+  const lockFileName = getLockFileName(packageFile);
+  const packages = await readLockPackages(lockFileName, packageFile);
+  if (!packages) {
+    return null;
+  }
+  return { lockFileName, packages };
+}
+
+async function mergedSources(
+  packageFile: string,
+  rootDir: string,
+  stack: Set<string>,
+  cache: Map<string, ApkoFile>,
+): Promise<MergedSources> {
+  if (stack.has(packageFile)) {
+    return { repositories: [], buildRepositories: [] };
+  }
+  const file = await readApkoFile(packageFile, cache);
+  if (!file) {
+    return { repositories: [], buildRepositories: [] };
+  }
+
+  stack.add(packageFile);
+  const merged: MergedSources = {
+    repositories: [],
+    buildRepositories: [],
+  };
+  const child = includedPath(rootDir, file.include);
+  if (child) {
+    const included = await mergedSources(child, rootDir, stack, cache);
+    merged.repositories.push(...included.repositories);
+    merged.buildRepositories.push(...included.buildRepositories);
+    merged.archs = included.archs;
+  }
+  merged.repositories.push(...file.repositories);
+  merged.buildRepositories.push(...file.buildRepositories);
+  if (file.archs?.length) {
+    merged.archs = file.archs;
+  }
+  stack.delete(packageFile);
+  return merged;
+}
+
+function depsFor(
+  file: ApkoFile,
+  repositories: RepositoryIndex,
+  archs: string[],
+  lockPackages: ApkoLockPackage[],
+): { deps: PackageDependency[]; tags: (string | null)[] } {
+  const deps: PackageDependency[] = [];
+  const tags: (string | null)[] = [];
+  for (const spec of file.specs) {
+    const visible =
+      spec.kind === 'versioned' &&
+      spec.tag &&
+      repositories.fileTags.has(spec.tag)
+        ? ({
+            kind: 'skip',
+            depName: spec.depName,
+            skipReason: 'local-dependency',
+          } as const)
+        : spec;
+    deps.push(toDependency(visible, repositories, archs, lockPackages));
+    tags.push(visible.kind === 'versioned' ? visible.tag : null);
+  }
+  return { deps, tags };
+}
+
+export async function extractPackageFile(
+  content: string,
+  packageFile: string,
+): Promise<PackageFileContent | null> {
+  const file = parseApkoFile(content, packageFile);
+  if (!file) {
+    return null;
+  }
+  if (!file.specs.length) {
     logger.debug(`No apk packages found in ${packageFile}`);
     return null;
   }
 
-  const apkArchs = requestedArchs(archs).map(
-    (arch) => apkArchByApkoArch.get(arch) ?? arch,
+  const repositories = repositoryIndex(
+    file.repositories,
+    file.buildRepositories,
   );
+  const apkArchs = apkArchsFor(file.archs);
   const lockFileName = getLockFileName(packageFile);
   const lockPackages = await readLockPackages(lockFileName, packageFile);
-  const deps = specs.map((spec) =>
-    toDependency(spec, repositories, apkArchs, coerceArray(lockPackages)),
+  const { deps } = depsFor(
+    file,
+    repositories,
+    apkArchs,
+    coerceArray(lockPackages),
   );
   if (!lockPackages) {
     return { deps };
   }
   return { deps, lockFiles: [lockFileName] };
+}
+
+function toPackageFile(entry: IncludedEntry): PackageFile {
+  const result: PackageFile = {
+    packageFile: entry.packageFile,
+    deps: entry.deps,
+  };
+  if (entry.lockFiles.length) {
+    result.lockFiles = entry.lockFiles;
+  }
+  return result;
+}
+
+export async function extractAllPackageFiles(
+  _config: ExtractConfig,
+  packageFiles: string[],
+): Promise<PackageFile[] | null> {
+  const cache = new Map<string, ApkoFile>();
+  const entries = new Map<string, IncludedEntry>();
+  const order: IncludedEntry[] = [];
+
+  async function appendStandalone(entry: IncludedEntry): Promise<void> {
+    addSource(
+      entry,
+      repositoryIndex(entry.file.repositories, entry.file.buildRepositories),
+      apkArchsFor(entry.file.archs),
+    );
+    const lock = await readLock(entry.packageFile);
+    if (lock) {
+      addLock(entry, lock);
+    }
+  }
+
+  async function visit(
+    packageFile: string,
+    rootDir: string,
+    repositories: RepositoryIndex,
+    archs: string[],
+    rootLock: LockRecord | null,
+    stack: Set<string>,
+  ): Promise<void> {
+    if (stack.has(packageFile)) {
+      return;
+    }
+    const file = await readApkoFile(packageFile, cache);
+    if (!file) {
+      return;
+    }
+    stack.add(packageFile);
+
+    if (file.specs.length) {
+      const existing = entries.get(packageFile);
+      if (existing) {
+        addSource(existing, repositories, archs);
+        if (rootLock) {
+          addLock(existing, rootLock);
+        }
+      } else {
+        const { deps, tags } = depsFor(file, repositories, archs, []);
+        const entry: IncludedEntry = {
+          packageFile,
+          file,
+          deps,
+          tags,
+          lockFiles: [],
+          lockPackages: [],
+        };
+        if (rootLock) {
+          addLock(entry, rootLock);
+        }
+        entries.set(packageFile, entry);
+        order.push(entry);
+      }
+    }
+
+    const child = includedPath(rootDir, file.include);
+    if (child) {
+      await visit(child, rootDir, repositories, archs, rootLock, stack);
+    }
+    stack.delete(packageFile);
+  }
+
+  for (const packageFile of packageFiles) {
+    const existing = entries.get(packageFile);
+    if (existing) {
+      await appendStandalone(existing);
+      continue;
+    }
+
+    const rootDir = upath.dirname(packageFile);
+    const merged = await mergedSources(packageFile, rootDir, new Set(), cache);
+    const repositories = repositoryIndex(
+      merged.repositories,
+      merged.buildRepositories,
+    );
+    const archs = apkArchsFor(merged.archs);
+    await visit(
+      packageFile,
+      rootDir,
+      repositories,
+      archs,
+      await readLock(packageFile),
+      new Set(),
+    );
+  }
+
+  if (!order.length) {
+    return null;
+  }
+  return order.map(toPackageFile);
 }

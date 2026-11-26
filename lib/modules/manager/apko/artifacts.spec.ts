@@ -1,7 +1,7 @@
 import { quote } from 'shlex';
 import upath from 'upath';
 import { mockDeep } from 'vitest-mock-extended';
-import { mockExecAll } from '~test/exec-util.ts';
+import { mockExecAll, mockExecSequence } from '~test/exec-util.ts';
 import { fs } from '~test/util.ts';
 import { GlobalConfig } from '../../../config/global.ts';
 import type {
@@ -28,6 +28,27 @@ const adminConfig: RepoGlobalConfig & InternalGlobalConfigOptions = {
 
 function lockCwd(packageFileName: string): string {
   return upath.join(repoDir, upath.dirname(packageFileName));
+}
+
+function mockReads(files: Record<string, string | string[]>): void {
+  const queues = new Map(
+    Object.entries(files).map(([fileName, value]) => [
+      fileName,
+      Array.isArray(value) ? [...value] : [value],
+    ]),
+  );
+  fs.readLocalFile.mockImplementation(
+    (fileName: string): Promise<string | null> => {
+      const queued = queues.get(fileName);
+      if (!queued?.length) {
+        return Promise.resolve(null);
+      }
+      if (queued.length === 1) {
+        return Promise.resolve(queued[0]);
+      }
+      return Promise.resolve(queued.shift() ?? null);
+    },
+  );
 }
 
 function artifact(overrides: Partial<UpdateArtifact> = {}): UpdateArtifact {
@@ -337,6 +358,312 @@ describe('modules/manager/apko/artifacts', () => {
         cmd: 'apko lock apko.yaml',
         options: { cwd: lockCwd(packageFileName) },
       },
+    ]);
+  });
+
+  it('regenerates the parent lock named by lockFiles', async () => {
+    mockReads({
+      'app/apko.lock.json': ['old\n', 'new\n'],
+      'app/apko.yaml': 'contents: {}\n',
+    });
+    const execSnapshots = mockExecAll();
+    const newPackageFileContent =
+      'contents:\n  packages:\n    - bash=5.2.38-r0\n';
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'app/pkgs/apko.yaml',
+          updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
+          newPackageFileContent,
+          config: { lockFiles: ['app/apko.lock.json'] },
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        file: {
+          type: 'addition',
+          path: 'app/apko.lock.json',
+          contents: 'new\n',
+        },
+      },
+    ]);
+    expect(fs.writeLocalFile).toHaveBeenCalledWith(
+      'app/pkgs/apko.yaml',
+      newPackageFileContent,
+    );
+    expect(execSnapshots).toEqual([
+      expect.objectContaining({
+        cmd: 'apko lock apko.yaml',
+        options: expect.objectContaining({
+          cwd: lockCwd('app/apko.yaml'),
+        }),
+      }),
+    ]);
+  });
+
+  it('locks image.yml when that sibling is the parent config', async () => {
+    mockReads({
+      'dir/image.lock.json': ['old\n', 'new\n'],
+      'dir/image.yml': 'contents: {}\n',
+    });
+    const execSnapshots = mockExecAll();
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'pkgs/extra.yaml',
+          updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
+          config: { lockFiles: ['dir/image.lock.json'] },
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        file: {
+          type: 'addition',
+          path: 'dir/image.lock.json',
+          contents: 'new\n',
+        },
+      },
+    ]);
+    expect(execSnapshots).toEqual([
+      expect.objectContaining({
+        cmd: 'apko lock image.yml',
+        options: expect.objectContaining({
+          cwd: lockCwd('dir/image.yml'),
+        }),
+      }),
+    ]);
+  });
+
+  it('regenerates every parent lock and skips one that is missing', async () => {
+    mockReads({
+      'images/a/apko.yaml': 'contents: {}\n',
+      'images/a/apko.lock.json': ['old-a\n', 'new-a\n'],
+      'images/b/apko.yaml': 'contents: {}\n',
+    });
+    const execSnapshots = mockExecAll();
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'shared/pkgs.yaml',
+          updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
+          config: {
+            lockFiles: ['images/a/apko.lock.json', 'images/b/apko.lock.json'],
+          },
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        file: {
+          type: 'addition',
+          path: 'images/a/apko.lock.json',
+          contents: 'new-a\n',
+        },
+      },
+    ]);
+    expect(execSnapshots).toEqual([
+      expect.objectContaining({
+        cmd: 'apko lock apko.yaml',
+        options: expect.objectContaining({
+          cwd: lockCwd('images/a/apko.yaml'),
+        }),
+      }),
+    ]);
+    expect(fs.readLocalFile.mock.calls.map((call) => call[0])).toContain(
+      'images/b/apko.lock.json',
+    );
+  });
+
+  it('regenerates parent locks during maintenance of the included file', async () => {
+    mockReads({
+      'app/apko.lock.json': ['old\n', 'new\n'],
+      'app/apko.yaml': 'contents: {}\n',
+    });
+    const execSnapshots = mockExecAll();
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'app/pkgs/apko.yaml',
+          config: {
+            isLockFileMaintenance: true,
+            lockFiles: ['app/apko.lock.json'],
+          },
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        file: {
+          type: 'addition',
+          path: 'app/apko.lock.json',
+          contents: 'new\n',
+        },
+      },
+    ]);
+    expect(execSnapshots).toEqual([
+      expect.objectContaining({
+        cmd: 'apko lock apko.yaml',
+        options: expect.objectContaining({
+          cwd: lockCwd('app/apko.yaml'),
+        }),
+      }),
+    ]);
+  });
+
+  it('returns the regenerated lock and an artifact error when another lock fails', async () => {
+    mockReads({
+      'images/a/apko.yaml': 'contents: {}\n',
+      'images/a/apko.lock.json': ['old-a\n', 'new-a\n'],
+      'images/b/apko.yaml': 'contents: {}\n',
+      'images/b/apko.lock.json': 'old-b\n',
+    });
+    mockExecSequence([
+      { stdout: '', stderr: '' },
+      new ExecError('apko failed', {
+        cmd: 'apko lock apko.yaml',
+        stdout: '',
+        stderr: 'boom',
+        options: {},
+      }),
+    ]);
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'shared/pkgs.yaml',
+          updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
+          config: {
+            lockFiles: ['images/a/apko.lock.json', 'images/b/apko.lock.json'],
+          },
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        file: {
+          type: 'addition',
+          path: 'images/a/apko.lock.json',
+          contents: 'new-a\n',
+        },
+      },
+      {
+        artifactError: {
+          fileName: 'images/b/apko.lock.json',
+          stderr: 'boom',
+        },
+      },
+    ]);
+  });
+
+  it('returns null when every configured lock file is missing', async () => {
+    mockReads({
+      'images/a/apko.yaml': 'contents: {}\n',
+      'images/b/apko.yaml': 'contents: {}\n',
+    });
+    const execSnapshots = mockExecAll();
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'shared/pkgs.yaml',
+          updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
+          config: {
+            lockFiles: ['images/a/apko.lock.json', 'images/b/apko.lock.json'],
+          },
+        }),
+      ),
+    ).resolves.toBeNull();
+    expect(execSnapshots).toEqual([]);
+  });
+
+  it('skips a lock that has no sibling config', async () => {
+    mockReads({
+      'images/a/apko.yaml': 'contents: {}\n',
+      'images/a/apko.lock.json': ['old-a\n', 'new-a\n'],
+      'orphan/apko.lock.json': 'old-orphan\n',
+    });
+    const execSnapshots = mockExecAll();
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'shared/pkgs.yaml',
+          updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
+          config: {
+            lockFiles: ['images/a/apko.lock.json', 'orphan/apko.lock.json'],
+          },
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        file: {
+          type: 'addition',
+          path: 'images/a/apko.lock.json',
+          contents: 'new-a\n',
+        },
+      },
+    ]);
+    expect(execSnapshots.map((snapshot) => snapshot.cmd)).toEqual([
+      'apko lock apko.yaml',
+    ]);
+  });
+
+  it('returns null when the only lock has no sibling config', async () => {
+    mockReads({
+      'orphan/apko.lock.json': 'old-orphan\n',
+    });
+    const execSnapshots = mockExecAll();
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'shared/pkgs.yaml',
+          updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
+          config: { lockFiles: ['orphan/apko.lock.json'] },
+        }),
+      ),
+    ).resolves.toBeNull();
+    expect(execSnapshots).toEqual([]);
+  });
+
+  it('locks apko.yml when that file is updated beside apko.yaml', async () => {
+    mockReads({
+      'apko.yaml': 'contents: {}\n',
+      'apko.yml': 'contents: {}\n',
+      'apko.lock.json': ['old\n', 'new\n'],
+    });
+    const execSnapshots = mockExecAll();
+    const newPackageFileContent =
+      'contents:\n  packages:\n    - bash=5.2.38-r0\n';
+
+    await expect(
+      updateArtifacts(
+        artifact({
+          packageFileName: 'apko.yml',
+          updatedDeps: [{ depName: 'bash', newValue: '5.2.38-r0' }],
+          newPackageFileContent,
+          config: { lockFiles: ['apko.lock.json'] },
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        file: {
+          type: 'addition',
+          path: 'apko.lock.json',
+          contents: 'new\n',
+        },
+      },
+    ]);
+    expect(fs.writeLocalFile).toHaveBeenCalledWith(
+      'apko.yml',
+      newPackageFileContent,
+    );
+    expect(execSnapshots).toEqual([
+      expect.objectContaining({
+        cmd: 'apko lock apko.yml',
+        options: expect.objectContaining({ cwd: repoDir }),
+      }),
     ]);
   });
 });

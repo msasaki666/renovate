@@ -9,8 +9,12 @@ Package specs use the [`apk` datasource](../../datasource/apk/index.md) and [`ap
 Renovate ignores `contents.runtime_repositories`.
 An `archs` list of `all`, or a missing `archs` list, uses apko's default architectures.
 
-Renovate does not follow `include`.
-Packages in an included file are extracted only when that file is read on its own.
+`include` is resolved from the root config's directory.
+Renovate emits the root first, then each included file depth-first, and reads a file once if includes form a cycle.
+The root's packages stay on the root file.
+Included files keep their own packages and use the root's merged repositories, architectures, and lock file.
+A path that cannot be read, or that leaves the repository, is ignored.
+When several roots include the same file, Renovate keeps one entry and unions the registry URLs and lock files in the order the roots were matched.
 
 ### Lock file
 

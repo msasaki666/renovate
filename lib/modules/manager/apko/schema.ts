@@ -21,11 +21,14 @@ const optionalArchs = z.preprocess(
 
 export const ApkoConfig = Yaml.pipe(
   z.object({
-    contents: z.object({
-      repositories: optionalStrings,
-      build_repositories: optionalStrings,
-      packages: z.array(z.string()),
-    }),
+    include: z.string().optional(),
+    contents: z
+      .object({
+        repositories: optionalStrings,
+        build_repositories: optionalStrings,
+        packages: optionalStrings,
+      })
+      .optional(),
     archs: optionalArchs,
   }),
 );
