@@ -26,7 +26,7 @@ export const ApkoConfig = Yaml.pipe(
       .object({
         repositories: optionalStrings,
         build_repositories: optionalStrings,
-        packages: z.array(z.string()).optional(),
+        packages: optionalStrings,
       })
       .optional(),
     archs: optionalArchs,
